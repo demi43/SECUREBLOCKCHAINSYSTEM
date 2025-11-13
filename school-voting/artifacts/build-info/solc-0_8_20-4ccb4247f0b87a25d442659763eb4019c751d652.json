@@ -1,0 +1,35 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_20-4ccb4247f0b87a25d442659763eb4019c751d652",
+  "solcVersion": "0.8.20",
+  "solcLongVersion": "0.8.20+commit.a1b79de6",
+  "userSourceNameMap": {
+    "contracts/schoolvoting.sol": "project/contracts/schoolvoting.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "shanghai",
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode",
+            "evm.deployedBytecode",
+            "evm.methodIdentifiers",
+            "metadata"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/schoolvoting.sol": {
+        "content": "// SPDX-License-Identifier: MIT\r\npragma solidity ^0.8.20;\r\n\r\ncontract SchoolVoting {\r\n    struct Candidate {\r\n        string name;\r\n        uint voteCount;\r\n    }\r\n\r\n    address public admin;\r\n    bool public electionEnded;\r\n    mapping(address => bool) public hasVoted;\r\n    Candidate[] public candidates;\r\n    uint public maxVoters;\r\n    uint public voterCount;\r\n    uint public electionStartTime;\r\n    uint public electionEndTime;\r\n\r\n    // Events for transparency (anonymized - no voter address)\r\n    event VoteCast(uint indexed candidateIndex, uint timestamp);\r\n    event ElectionEnded(address indexed admin);\r\n    event ElectionStarted(uint startTime, uint endTime);\r\n\r\n    constructor(string[] memory candidateNames, uint _maxVoters, uint _electionDurationHours) {\r\n        admin = msg.sender;\r\n        maxVoters = _maxVoters;\r\n        electionStartTime = block.timestamp;\r\n        electionEndTime = block.timestamp + (_electionDurationHours * 1 hours);\r\n        \r\n        for (uint i = 0; i < candidateNames.length; i++) {\r\n            candidates.push(Candidate(candidateNames[i], 0));\r\n        }\r\n        \r\n        emit ElectionStarted(electionStartTime, electionEndTime);\r\n    }\r\n\r\n    function vote(uint candidateIndex) public {\r\n        _castVote(candidateIndex, msg.sender);\r\n    }\r\n\r\n    function voteByName(string memory candidateName) public {\r\n        (uint candidateIndex, bool exists) = _findCandidateIndex(candidateName);\r\n        require(exists, \"Candidate does not exist\");\r\n        _castVote(candidateIndex, msg.sender);\r\n    }\r\n\r\n    // Function to vote on behalf of a voter (for server-signed transactions)\r\n    function voteForAddress(uint candidateIndex, address voter) public {\r\n        _castVote(candidateIndex, voter);\r\n    }\r\n\r\n    function voteByNameForAddress(string memory candidateName, address voter) public {\r\n        (uint candidateIndex, bool exists) = _findCandidateIndex(candidateName);\r\n        require(exists, \"Candidate does not exist\");\r\n        _castVote(candidateIndex, voter);\r\n    }\r\n\r\n    function endElection() public {\r\n        require(msg.sender == admin, \"Only admin can end the election\");\r\n        electionEnded = true;\r\n        emit ElectionEnded(admin);\r\n    }\r\n\r\n    function getCandidates() public view returns (Candidate[] memory) {\r\n        return candidates;\r\n    }\r\n\r\n    function getWinner() public view returns (string memory winnerName, uint winnerVotes, bool isTie) {\r\n        require(electionEnded || block.timestamp > electionEndTime, \"Election is still ongoing\");\r\n        \r\n        if (candidates.length == 0) {\r\n            return (\"\", 0, false);\r\n        }\r\n        \r\n        uint maxVotes = 0;\r\n        uint winnerIndex = 0;\r\n        uint winnerCount = 0;\r\n        \r\n        // Find the maximum vote count\r\n        for (uint i = 0; i < candidates.length; i++) {\r\n            if (candidates[i].voteCount > maxVotes) {\r\n                maxVotes = candidates[i].voteCount;\r\n                winnerIndex = i;\r\n                winnerCount = 1;\r\n            } else if (candidates[i].voteCount == maxVotes && maxVotes > 0) {\r\n                winnerCount++;\r\n            }\r\n        }\r\n        \r\n        isTie = (winnerCount > 1);\r\n        winnerName = candidates[winnerIndex].name;\r\n        winnerVotes = maxVotes;\r\n        \r\n        return (winnerName, winnerVotes, isTie);\r\n    }\r\n\r\n    function getElectionStats() public view returns (\r\n        uint totalVoters,\r\n        uint maxAllowedVoters,\r\n        uint remainingVoters,\r\n        bool isActive,\r\n        uint timeRemaining\r\n    ) {\r\n        totalVoters = voterCount;\r\n        maxAllowedVoters = maxVoters;\r\n        remainingVoters = maxVoters > voterCount ? maxVoters - voterCount : 0;\r\n        isActive = !electionEnded && block.timestamp >= electionStartTime && block.timestamp <= electionEndTime;\r\n        \r\n        if (block.timestamp < electionEndTime) {\r\n            timeRemaining = electionEndTime - block.timestamp;\r\n        } else {\r\n            timeRemaining = 0;\r\n        }\r\n        \r\n        return (totalVoters, maxAllowedVoters, remainingVoters, isActive, timeRemaining);\r\n    }\r\n\r\n    function getCandidateIndexByName(string memory candidateName) public view returns (uint, bool) {\r\n        return _findCandidateIndex(candidateName);\r\n    }\r\n\r\n    function _castVote(uint candidateIndex, address voter) internal {\r\n        require(!electionEnded, \"Election has ended\");\r\n        require(block.timestamp >= electionStartTime, \"Election has not started yet\");\r\n        require(block.timestamp <= electionEndTime, \"Election time has expired\");\r\n        require(!hasVoted[voter], \"You have already voted\");\r\n        require(candidateIndex < candidates.length, \"Invalid candidate index\");\r\n        require(voterCount < maxVoters, \"Maximum voters reached\");\r\n\r\n        hasVoted[voter] = true;\r\n        voterCount++;\r\n        candidates[candidateIndex].voteCount++;\r\n        \r\n        // Emit event without voter address for anonymity\r\n        emit VoteCast(candidateIndex, block.timestamp);\r\n    }\r\n\r\n    function _findCandidateIndex(string memory candidateName) internal view returns (uint, bool) {\r\n        bytes32 target = keccak256(bytes(candidateName));\r\n        for (uint i = 0; i < candidates.length; i++) {\r\n            if (keccak256(bytes(candidates[i].name)) == target) {\r\n                return (i, true);\r\n            }\r\n        }\r\n        return (0, false);\r\n    }\r\n}\r\n"
+      }
+    }
+  }
+}

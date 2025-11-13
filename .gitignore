@@ -1,0 +1,27 @@
+   # Dependencies
+   node_modules/
+   .venv/
+   __pycache__/
+   *.pyc
+   
+   # Environment variables
+   .env
+   backend/.env
+   
+   # Build outputs
+   dist/
+   build/
+   *.log
+   
+   # IDE
+   .vscode/
+   .idea/
+   *.swp
+   
+   # OS
+   .DS_Store
+   Thumbs.db
+   
+   # Hardhat
+   school-voting/cache/
+   school-voting/artifacts/
