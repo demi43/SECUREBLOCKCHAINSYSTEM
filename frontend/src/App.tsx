@@ -815,11 +815,6 @@ function App() {
         Array.from(elections.keys())
       );
       
-      // Check if user has synced session ID
-      const userSessionId = getUserSessionId();
-      const hasSyncedSession = localStorage.getItem('voting_user_session_id') && 
-                                userSessionId.startsWith('user_'); // Check if it's a generated one
-      
       let errorMessage = `Election "${normalizedId}" not found in this browser!\n\n`;
       errorMessage += `Elections are stored per-browser in localStorage. `;
       errorMessage += `To vote from multiple devices:\n`;
