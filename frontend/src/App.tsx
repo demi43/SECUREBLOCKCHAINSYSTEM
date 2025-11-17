@@ -814,17 +814,25 @@ function App() {
         "Election not found. Available elections:",
         Array.from(elections.keys())
       );
-      toast.error(
-        `Election "${normalizedId}" not found in this browser! ` +
-          `Elections are stored per-browser in localStorage. ` +
-          `If this election was created in another browser, you'll need to create it again ` +
-          `or have the creator share the Election ID. ` +
-          `Available elections in this browser: ${
-            elections.size > 0
-              ? Array.from(elections.keys()).join(", ")
-              : "none"
-          }`
-      );
+      
+      // Check if user has synced session ID
+      const userSessionId = getUserSessionId();
+      const hasSyncedSession = localStorage.getItem('voting_user_session_id') && 
+                                userSessionId.startsWith('user_'); // Check if it's a generated one
+      
+      let errorMessage = `Election "${normalizedId}" not found in this browser!\n\n`;
+      errorMessage += `Elections are stored per-browser in localStorage. `;
+      errorMessage += `To vote from multiple devices:\n`;
+      errorMessage += `1. Make sure you've synced your Session ID (use "Cross-Device Sync" on homepage)\n`;
+      errorMessage += `2. The election creator needs to share the Election ID with you\n`;
+      errorMessage += `3. Join the election using the Election ID\n\n`;
+      errorMessage += `Available elections in this browser: ${
+        elections.size > 0
+          ? Array.from(elections.keys()).join(", ")
+          : "none"
+      }`;
+      
+      toast.error(errorMessage, { duration: 8000 });
     }
   }
 
