@@ -58,7 +58,7 @@ export function BlockchainViewer({ blocks, isValid }: BlockchainViewerProps) {
       </Card>
 
       <div className="blocks-container">
-        {blocks.map((block, index) => (
+        {blocks.map((block) => (
           <Card key={block.index} className="block-card">
             <CardHeader>
               <CardTitle className="flex items-center justify-between">

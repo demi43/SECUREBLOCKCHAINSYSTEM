@@ -70,7 +70,8 @@ export function VotingInterface({ onVote, hasVoted, candidates, voterAddress, is
   
   // Generate a unique ID for this tab that persists across page reloads
   // Use sessionStorage to ensure it's unique per tab
-  const [tabId] = useState(() => {
+  // Note: Currently unused but kept for potential future use
+  const [_tabId] = useState(() => {
     const storageKey = 'voting_tab_id';
     let tabId = sessionStorage.getItem(storageKey);
     if (!tabId) {
