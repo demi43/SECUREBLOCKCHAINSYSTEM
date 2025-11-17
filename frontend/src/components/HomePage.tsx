@@ -1,8 +1,22 @@
+/**
+ * HomePage Component
+ * 
+ * This is the main landing page of the voting application.
+ * It allows users to:
+ * - Create new elections
+ * - Join existing elections by ID
+ * - View and manage their elections (active, pending, closed)
+ * - Delete closed elections
+ */
+
+// Import React hooks for state management
 import { useState } from 'react';
+// Import UI components for building the homepage
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
+// Import dialog components for creating elections
 import {
   AlertDialog,
   AlertDialogAction,
@@ -14,65 +28,115 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from './ui/alert-dialog';
+// Import icons for visual elements
 import { Plus, Users, Clock, Calendar, Shield, CheckCircle2, XCircle, Trash2 } from 'lucide-react';
+// Import toast notifications for user feedback
 import { toast } from 'sonner';
 
+/**
+ * Election interface
+ * Represents an election with all its properties
+ */
 export interface Election {
+  // Unique identifier for the election
   id: string;
+  // Title/name of the election
   title: string;
+  // Optional description of the election
   description?: string;
+  // Array of candidate names
   candidates: string[];
+  // Timestamp when the election ends (milliseconds since epoch)
   endTime: number;
+  // Timestamp when the election was created (milliseconds since epoch)
   createdAt: number;
+  // Current status of the election
   status: 'active' | 'closed';
+  // Optional Ethereum contract address if election is deployed to blockchain
   contractAddress?: string;
 }
 
+/**
+ * Props interface for HomePage component
+ */
 interface HomePageProps {
+  // Callback function when user creates a new election
   onCreateElection: (electionData: Omit<Election, 'id' | 'createdAt' | 'status'>) => void;
+  // Callback function when user joins an election by ID
   onJoinElection: (electionId: string) => void;
+  // Callback function when user deletes an election
   onDeleteElection: (electionId: string) => void;
+  // Array of all elections to display
   elections: Election[];
 }
 
+/**
+ * HomePage Component
+ * 
+ * Main landing page component that provides:
+ * - Election creation interface
+ * - Election joining interface
+ * - Election list display (active, pending, closed)
+ * - Election management (delete)
+ * 
+ * @param onCreateElection - Function to call when creating a new election
+ * @param onJoinElection - Function to call when joining an election
+ * @param onDeleteElection - Function to call when deleting an election
+ * @param elections - Array of elections to display
+ */
 export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, elections }: HomePageProps) {
+  // State for the election ID input when joining an election
   const [joinElectionId, setJoinElectionId] = useState('');
+  // State controlling visibility of the create election dialog
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  // State for the new election form data
   const [newElection, setNewElection] = useState({
-    title: '',
-    description: '',
-    candidates: ['', ''],
-    endDate: '',
-    endTime: '',
+    title: '',           // Election title
+    description: '',     // Election description
+    candidates: ['', ''], // Array of candidate names (starts with 2 empty strings)
+    endDate: '',         // End date (YYYY-MM-DD format)
+    endTime: '',         // End time (HH:MM format)
   });
 
+  /**
+   * Handle election creation
+   * Validates form data and calls onCreateElection callback
+   */
   const handleCreateElection = () => {
+    // Validate that title is not empty
     if (!newElection.title.trim()) {
       toast.error("Election title cannot be empty.");
       return;
     }
+    // Validate that at least 2 candidates are provided
     if (newElection.candidates.filter(c => c.trim()).length < 2) {
       toast.error("Please add at least two candidates.");
       return;
     }
+    // Validate that end date and time are provided
     if (!newElection.endDate || !newElection.endTime) {
       toast.error("Please select an end date and time.");
       return;
     }
 
+    // Combine date and time into a single timestamp
     const endDateTime = new Date(`${newElection.endDate}T${newElection.endTime}`).getTime();
+    // Validate that end date/time is in the future
     if (endDateTime <= Date.now()) {
       toast.error("End date and time must be in the future.");
       return;
     }
 
+    // Call the onCreateElection callback with validated data
     onCreateElection({
       title: newElection.title,
       description: newElection.description,
+      // Filter out empty candidate names
       candidates: newElection.candidates.filter(c => c.trim()),
       endTime: endDateTime,
     });
 
+    // Reset the form after successful creation
     setNewElection({
       title: '',
       description: '',
@@ -80,34 +144,60 @@ export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, e
       endDate: '',
       endTime: '',
     });
+    // Close the create dialog
     setShowCreateDialog(false);
   };
 
+  /**
+   * Add a new candidate input field to the form
+   */
   const handleAddCandidate = () => {
     setNewElection({
       ...newElection,
+      // Add a new empty string to the candidates array
       candidates: [...newElection.candidates, ''],
     });
   };
 
+  /**
+   * Remove a candidate input field from the form
+   * Ensures at least one candidate field remains
+   * 
+   * @param index - Index of the candidate to remove
+   */
   const handleRemoveCandidate = (index: number) => {
+    // Only allow removal if there's more than one candidate
     if (newElection.candidates.length > 1) {
       setNewElection({
         ...newElection,
+        // Filter out the candidate at the specified index
         candidates: newElection.candidates.filter((_, i) => i !== index),
       });
     }
   };
 
+  /**
+   * Handle change to a candidate input field
+   * 
+   * @param index - Index of the candidate being edited
+   * @param value - New value for the candidate name
+   */
   const handleCandidateChange = (index: number, value: string) => {
+    // Create a copy of the candidates array
     const newCandidates = [...newElection.candidates];
+    // Update the candidate at the specified index
     newCandidates[index] = value;
+    // Update state with the modified candidates array
     setNewElection({ ...newElection, candidates: newCandidates });
   };
 
+  // Render the homepage UI
   return (
+    // Main container with gradient background
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-purple-950 to-slate-900">
+      {/* Container for page content */}
       <div className="container mx-auto px-4 py-12 max-w-6xl">
+        {/* Hero section with title and description */}
         <div className="text-center mb-12">
           <h1 className="hero-title mb-4">Blockchain Voting Platform</h1>
           <p className="hero-subtitle mb-4">
@@ -118,8 +208,9 @@ export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, e
           </p>
         </div>
 
+        {/* Grid layout for Create and Join election cards */}
         <div className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto mb-12">
-          {/* Create Election Card */}
+          {/* Create Election Card - Opens dialog to create new election */}
           <AlertDialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
             <Card className="glass-card hover:scale-105 transition-transform cursor-pointer border-purple-500/30">
               <AlertDialogTrigger asChild>
@@ -279,14 +370,20 @@ export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, e
           </Card>
         </div>
 
+        {/* Display elections list if there are any elections */}
         {elections.length > 0 && (() => {
+          // Get current timestamp for filtering
           const now = Date.now();
+          // Filter active elections (status is active and end time hasn't passed)
           const activeElections = elections.filter(e => 
             e.status === 'active' && e.endTime > now
           );
+          // Filter closed elections (status is closed OR end time has passed)
           const closedElections = elections.filter(e => 
             e.status === 'closed' || e.endTime <= now
           );
+          // Filter pending elections (active, not ended, and created in the last minute)
+          // This shows elections that were just created
           const pendingElections = elections.filter(e => 
             e.status === 'active' && e.endTime > now && e.createdAt > now - 60000 // Created in last minute
           );

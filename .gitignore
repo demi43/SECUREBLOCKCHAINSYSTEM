@@ -1,27 +1,34 @@
-   # Dependencies
-   node_modules/
-   .venv/
-   __pycache__/
-   *.pyc
-   
-   # Environment variables
-   .env
-   backend/.env
-   
-   # Build outputs
-   dist/
-   build/
-   *.log
-   
-   # IDE
-   .vscode/
-   .idea/
-   *.swp
-   
-   # OS
-   .DS_Store
-   Thumbs.db
-   
-   # Hardhat
-   school-voting/cache/
-   school-voting/artifacts/
+ # Environment variables (NEVER commit these!)
+.env
+backend/.env
+frontend/.env
+school-voting/.env
+*.env
+
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/*.pyc
+backend/.pytest_cache/
+
+# Node
+node_modules/
+frontend/node_modules/
+school-voting/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+backend/*.egg-info/
+school-voting/artifacts/
+school-voting/cache/

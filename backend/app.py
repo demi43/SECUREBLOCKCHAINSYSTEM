@@ -152,11 +152,15 @@ def get_candidates(contractAddress: str | None = None) -> Dict[str, Any]:
     _ensure_contract_connection()
     try:
         target_contract = _get_contract_instance(contractAddress)
-        candidates: List[Any] = target_contract.functions.getCandidates().call()
-        formatted = [
-            {"name": candidate[0], "voteCount": str(candidate[1])}
-            for candidate in candidates
-        ]
+        # New contract uses public candidates array, need to read each candidate
+        candidate_count = target_contract.functions.candidateCount().call()
+        formatted = []
+        for i in range(candidate_count):
+            candidate = target_contract.functions.candidates(i).call()
+            formatted.append({
+                "name": candidate[0],
+                "voteCount": str(candidate[1])
+            })
         return {"success": True, "data": formatted}
     except ContractLogicError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -182,57 +186,25 @@ def get_stats(contractAddress: str | None = None) -> Dict[str, Any]:
 @app.get("/api/admin")
 def get_admin() -> Dict[str, Any]:
     _ensure_contract_connection()
-    admin_address = contract.functions.admin().call()
-    return {"success": True, "data": admin_address}
+    owner_address = contract.functions.owner().call()
+    return {"success": True, "data": owner_address}
 
 
-def _generate_anonymous_address() -> str:
-    """Generate a random one-time Ethereum address for anonymous voting.
+def _generate_anonymous_address() -> tuple[str, Account]:
+    """Generate a random one-time Ethereum address and its account for anonymous voting.
     
+    Returns both the address and the Account object (with private key) so we can sign messages.
     This address cannot be traced back to the voter ID, providing true anonymity.
     The address is only used to prevent double voting and is not linked to identity.
+    
+    Returns:
+        tuple: (address_string, Account object with private key)
     """
     import secrets
     # Generate cryptographically secure random 32-byte private key
     random_key = secrets.token_bytes(32)
     account = Account.from_key(random_key)
-    return account.address
-
-def _voter_id_to_address(voter_id: str) -> str:
-    """Convert a voter ID string to a deterministic Ethereum address.
-    
-    DEPRECATED: This function is kept for backward compatibility but should
-    not be used for new votes. Use _generate_anonymous_address() instead.
-    """
-    # Use keccak256 hash of voter ID, take first 20 bytes (address length)
-    hash_bytes = Web3.keccak(text=voter_id)
-    # Convert HexBytes to bytes and take first 20 bytes
-    address_bytes = bytes(hash_bytes[:20])
-    # Convert to hex string and create address
-    address_hex = "0x" + address_bytes.hex()
-    address = Web3.to_checksum_address(address_hex)
-    return address
-
-
-@app.get("/api/has-voted/{voter_id}")
-def has_voted(voter_id: str, contractAddress: str | None = None) -> JSONResponse:
-    """Check if a voter ID has already voted.
-    
-    NOTE: With anonymous voting, we cannot check if a specific voter ID has voted
-    because votes use random addresses that cannot be traced back to voter IDs.
-    This endpoint always returns False to maintain anonymity.
-    The frontend should use sessionStorage to track if a tab has voted.
-    """
-    print(f"[HAS-VOTED] Received request: voter_id={voter_id}, contractAddress={contractAddress}")
-    print(f"[HAS-VOTED] NOTE: With anonymous voting, we cannot verify if a voter ID has voted")
-    print(f"[HAS-VOTED] Returning False to maintain anonymity (frontend should track via sessionStorage)")
-    
-    # With anonymous voting, we cannot check if a voter ID has voted
-    # because the address is random and cannot be traced back to the voter ID
-    # The frontend should handle duplicate voting prevention via sessionStorage
-    response_data = {"success": True, "data": False}
-    return JSONResponse(content=response_data, status_code=200)
-
+    return account.address, account
 
 def _build_transaction() -> Dict[str, Any]:
     """Build transaction parameters using server account."""
@@ -275,9 +247,9 @@ def vote(payload: Dict[str, Any]) -> Dict[str, Any]:
     target_contract = _get_contract_instance(contract_address)
     print(f"[VOTE] Using contract address: {contract_address or CONTRACT_ADDRESS}")
 
-    # Generate anonymous one-time address (cannot be traced back to voter ID)
+    # Generate anonymous one-time address with private key (cannot be traced back to voter ID)
     try:
-        voter_address = _generate_anonymous_address()
+        voter_address, voter_account = _generate_anonymous_address()
         print(f"[VOTE] Generated anonymous address: {voter_address}")
         print(f"[VOTE] Note: This address cannot be linked to the voter ID for anonymity")
     except Exception as exc:
@@ -292,7 +264,7 @@ def vote(payload: Dict[str, Any]) -> Dict[str, Any]:
         if has_voted:
             # If collision occurs, generate a new address (extremely rare)
             print(f"[VOTE] Address collision detected, generating new address...")
-            voter_address = _generate_anonymous_address()
+            voter_address, voter_account = _generate_anonymous_address()
             has_voted = target_contract.functions.hasVoted(voter_address).call()
             if has_voted:
                 raise HTTPException(status_code=500, detail="Address collision - please try again")
@@ -303,22 +275,69 @@ def vote(payload: Dict[str, Any]) -> Dict[str, Any]:
         pass  # Continue if check fails, contract will reject anyway
 
     try:
-        # Build transaction
-        print("[VOTE] Building transaction...")
+        # Get the voter's current nonce from the contract
+        voter_nonce = target_contract.functions.nonces(voter_address).call()
+        print(f"[VOTE] Voter nonce: {voter_nonce}")
+        
+        # Determine candidate index
+        if isinstance(candidate, str) and candidate.isdigit():
+            candidate_index = int(candidate)
+            print(f"[VOTE] Voting by index: {candidate_index}")
+        else:
+            # Get candidate index by name
+            candidate_index, exists = target_contract.functions.getCandidateIndexByName(candidate).call()
+            if not exists:
+                raise HTTPException(status_code=400, detail=f"Candidate '{candidate}' not found")
+            print(f"[VOTE] Voting by name: {candidate} (index: {candidate_index})")
+        
+        # Get contract address for message signing
+        contract_address_checksum = Web3.to_checksum_address(contract_address or CONTRACT_ADDRESS)
+        voter_address_checksum = Web3.to_checksum_address(voter_address)
+        
+        # Create the message hash: keccak256(abi.encodePacked(address(this), voter, candidateIndex, nonce))
+        # We need to manually pack the data to match Solidity's abi.encodePacked
+        from eth_utils import keccak
+        from eth_utils.conversions import to_bytes
+        
+        # Encode each value and concatenate (matching abi.encodePacked behavior)
+        # Addresses are 20 bytes, uint256 is 32 bytes
+        contract_bytes = to_bytes(hexstr=contract_address_checksum)
+        voter_bytes = to_bytes(hexstr=voter_address_checksum)
+        candidate_bytes = candidate_index.to_bytes(32, byteorder='big')
+        nonce_bytes = voter_nonce.to_bytes(32, byteorder='big')
+        
+        # Concatenate all bytes (this is what abi.encodePacked does)
+        packed_data = contract_bytes + voter_bytes + candidate_bytes + nonce_bytes
+        message_hash = keccak(packed_data)
+        
+        # The contract's _prefixed function adds "\x19Ethereum Signed Message:\n32" prefix
+        # So we need to sign the prefixed hash
+        # The contract does: keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", message_hash))
+        eth_sign_prefix = b"\x19Ethereum Signed Message:\n32"
+        prefixed_data = eth_sign_prefix + message_hash
+        prefixed_hash = keccak(prefixed_data)
+        
+        # Sign the prefixed hash with the anonymous voter's private key
+        signed_message = voter_account.signHash(prefixed_hash)
+        signature = signed_message.signature
+        
+        print(f"[VOTE] Message signed with anonymous voter's key")
+        print(f"[VOTE] Building transaction...")
+        
+        # Build transaction to call voteBySignature
         tx_params = _build_transaction()
         print(f"[VOTE] Transaction params: from={tx_params['from']}, nonce={tx_params['nonce']}")
         
-        # Build transaction data - use voteForAddress to specify the voter address
-        if isinstance(candidate, str) and candidate.isdigit():
-            print(f"[VOTE] Voting by index: {int(candidate)}")
-            tx_data = target_contract.functions.voteForAddress(int(candidate), voter_address).build_transaction(tx_params)
-        else:
-            print(f"[VOTE] Voting by name: {candidate}")
-            tx_data = target_contract.functions.voteByNameForAddress(candidate, voter_address).build_transaction(tx_params)
+        tx_data = target_contract.functions.voteBySignature(
+            candidate_index,
+            Web3.to_checksum_address(voter_address),
+            voter_nonce,
+            signature
+        ).build_transaction(tx_params)
 
         print(f"[VOTE] Transaction data built. Gas: {tx_data.get('gas')}, Gas price: {tx_data.get('gasPrice')}")
 
-        # Sign transaction with server private key
+        # Sign transaction with server private key (for gas payment)
         print("[VOTE] Signing transaction...")
         signed_txn = SERVER_ACCOUNT.sign_transaction(tx_data)
         print(f"[VOTE] Transaction signed. Sending...")

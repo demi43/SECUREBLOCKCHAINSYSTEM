@@ -1,4 +1,18 @@
+/**
+ * App.tsx - Main Application Component
+ *
+ * This is the root component of the blockchain voting application.
+ * It manages:
+ * - Election state and storage (localStorage)
+ * - Real-time updates via Ably (cross-device sync)
+ * - Backend API integration for blockchain voting
+ * - Vote submission and blockchain management
+ * - UI routing between HomePage and Election views
+ */
+
+// Import React hooks for state management, side effects, and memoization
 import { useState, useEffect, useMemo, useRef } from "react";
+// Import UI components
 import { VotingInterface } from "./components/VotingInterface";
 import { BlockchainViewer } from "./components/BlockchainViewer";
 import { VoteResults } from "./components/VoteResults";
@@ -7,10 +21,25 @@ import type { Election } from "./components/HomePage";
 import { ElectionTimer } from "./components/ElectionTimer";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { Button } from "./ui/button";
+// Import icons for UI elements
 import { Shield, Vote, BarChart3, Home, Copy, Check } from "lucide-react";
+// Import toast notifications for user feedback
 import { toast } from "sonner";
+// Import API client for backend communication
 import { api } from "./api";
+// Import Ably functions for real-time updates and cross-device sync
+import {
+  subscribeToElectionUpdates,
+  publishVoteEvent,
+  publishStatsEvent,
+  publishUserVoteStatus,
+  getUserSessionId,
+  enterPresence,
+  type UserVoteStatus,
+} from "./ably";
+// Import TypeScript types for API responses
 import type { Candidate, ElectionStats } from "./api";
+// Import alert dialog components for confirmations
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,64 +52,129 @@ import {
   AlertDialogTrigger,
 } from "./components/ui/alert-dialog";
 
+/**
+ * Vote interface
+ * Represents a single vote in the blockchain
+ */
 export interface Vote {
+  // Voter ID (anonymized as "ANONYMOUS" for privacy)
   voterId: string;
+  // Name of the candidate voted for
   candidate: string;
+  // Timestamp when the vote was cast (milliseconds since epoch)
   timestamp: number;
 }
 
+/**
+ * Block interface
+ * Represents a block in the blockchain
+ */
 export interface Block {
+  // Sequential index of the block (0 for genesis block)
   index: number;
+  // Timestamp when the block was created (milliseconds since epoch)
   timestamp: number;
+  // Array of votes contained in this block
   votes: Vote[];
+  // Hash of the previous block (creates the chain)
   previousHash: string;
+  // Cryptographic hash of this block's data
   hash: string;
+  // Nonce value used in mining (proof of work)
   nonce: number;
-}
-
-interface ElectionData {
-  election: Election;
-  blockchain: Block[];
-  votedIds: Set<string>;
+  // Optional: Transaction hash from blockchain (for contract elections)
+  transactionHash?: string;
+  // Optional: Block type (genesis, vote, deployment)
+  blockType?: 'genesis' | 'vote' | 'deployment';
+  // Optional: Contract address (for genesis/deployment blocks)
   contractAddress?: string;
 }
 
-// Helper function to calculate block hash (needed for loading elections)
+/**
+ * ElectionData interface
+ * Represents the complete data for an election including blockchain
+ */
+interface ElectionData {
+  // Election metadata (title, candidates, dates, etc.)
+  election: Election;
+  // Array of blocks in the blockchain for this election
+  blockchain: Block[];
+  // Optional Ethereum contract address if election is deployed to blockchain
+  contractAddress?: string;
+}
+
+/**
+ * Calculate the hash of a block
+ *
+ * This function creates a cryptographic hash of the block's data.
+ * The hash is used to:
+ * - Link blocks together (previousHash in next block)
+ * - Verify block integrity (any change breaks the hash)
+ * - Mine blocks (find nonce that produces hash with required difficulty)
+ *
+ * @param block - The block to calculate the hash for
+ * @returns Hexadecimal hash string (16 characters)
+ */
 function calculateHash(block: Block): string {
+  // Combine all block data into a single string
+  // This ensures any change to the block data will change the hash
   const data =
-    block.index +
-    block.timestamp +
-    JSON.stringify(block.votes) +
-    block.previousHash +
-    block.nonce;
+    block.index + // Block index
+    block.timestamp + // Creation timestamp
+    JSON.stringify(block.votes) + // All votes in the block
+    block.previousHash + // Hash of previous block
+    block.nonce; // Nonce value (for mining)
 
   // Simple hash function for demonstration
+  // In production, you might use a more secure hash like SHA-256
   let hash = 0;
+  // Iterate through each character in the data string
   for (let i = 0; i < data.length; i++) {
     const char = data.charCodeAt(i);
+    // Simple hash algorithm: left shift and add character code
     hash = (hash << 5) - hash + char;
+    // Bitwise AND to keep hash within 32-bit integer range
     hash = hash & hash;
   }
+  // Convert to positive number, then to hexadecimal, pad to 16 characters
   return Math.abs(hash).toString(16).padStart(16, "0");
 }
 
-// Load elections from localStorage on app start
+/**
+ * Load elections from localStorage on app start
+ *
+ * This function retrieves all saved elections from browser localStorage.
+ * It handles two types of elections:
+ * 1. Contract elections: Only metadata is saved (for security)
+ * 2. Local elections: Full blockchain data is saved
+ *
+ * @returns Map of election ID to ElectionData
+ */
 function loadElectionsFromStorage(): Map<string, ElectionData> {
   try {
+    // Retrieve the stored elections JSON string from localStorage
     const stored = localStorage.getItem("blockchain_voting_elections");
+    // If nothing is stored, return empty Map
     if (!stored) {
       console.log("No elections found in localStorage");
       return new Map();
     }
 
+    // Parse the JSON string into an object
     const parsed = JSON.parse(stored);
+    // Create a Map to store the elections (Map preserves insertion order)
     const electionsMap = new Map<string, ElectionData>();
 
+    // Iterate through each stored election
     for (const [id, data] of Object.entries(parsed)) {
       const electionData = data as any;
-      const contractAddress = electionData.contractAddress || electionData.election?.contractAddress;
+      // Extract contract address (may be in election object or top level)
+      const contractAddress =
+        electionData.contractAddress || electionData.election?.contractAddress;
+      // Check if this is metadata-only storage (contract elections)
       const isMetadataOnly = electionData.metadataOnly === true;
-      
+
+      // Log election details for debugging
       console.log(`Loading election ${id}:`, {
         title: electionData.election?.title,
         candidates: electionData.election?.candidates,
@@ -88,63 +182,84 @@ function loadElectionsFromStorage(): Map<string, ElectionData> {
         contractAddress: contractAddress,
         metadataOnly: isMetadataOnly,
       });
-      
+
+      // Handle contract elections (deployed to blockchain)
       if (isMetadataOnly && contractAddress) {
         // This is a contract election - only metadata was saved
         // Create a minimal ElectionData with genesis block
         // Real blockchain data will be loaded from backend
         const genesisBlock: Block = {
-          index: 0,
-          timestamp: electionData.election.createdAt || Date.now(),
-          votes: [],
-          previousHash: "0",
-          hash: "",
-          nonce: 0,
+          index: 0, // Genesis block is always index 0
+          timestamp: electionData.election.createdAt || Date.now(), // Use creation time
+          votes: [], // No votes in genesis block
+          previousHash: "0", // Genesis has no previous block
+          hash: "", // Will be calculated
+          nonce: 0, // No mining needed for genesis
         };
+        // Calculate hash for the genesis block
         genesisBlock.hash = calculateHash(genesisBlock);
-        
+
+        // Store election with just metadata and genesis block
         electionsMap.set(id, {
           election: electionData.election,
           blockchain: [genesisBlock], // Start with genesis block, backend will provide real data
-          votedIds: new Set(), // Not used for contracts
           contractAddress: contractAddress,
         });
-        console.log(`Loaded contract election ${id} metadata (blockchain will load from backend)`);
+        console.log(
+          `Loaded contract election ${id} metadata (blockchain will load from backend)`
+        );
       } else {
-        // Local-only election - load everything
+        // Local-only election - load everything including full blockchain
         electionsMap.set(id, {
           election: electionData.election,
-          blockchain: electionData.blockchain || [],
-          votedIds: new Set(electionData.votedIds || []),
-          contractAddress: contractAddress || null,
+          blockchain: electionData.blockchain || [], // Load full blockchain
+          contractAddress: contractAddress || null, // No contract for local elections
         });
         console.log(`Loaded local-only election ${id} with full data`);
       }
     }
 
+    // Log total number of elections loaded
     console.log(`Loaded ${electionsMap.size} elections from localStorage`);
     return electionsMap;
   } catch (err) {
+    // If parsing fails, log error and return empty Map
     console.error("Error loading elections from storage:", err);
     return new Map();
   }
 }
 
-// Save elections to localStorage
-// SOLUTION 5: Save election metadata for contracts (so users can rejoin), but NOT blockchain/vote data
+/**
+ * Save elections to localStorage
+ *
+ * This function saves elections to browser localStorage for persistence.
+ * For security, contract elections only save metadata (not blockchain data).
+ * Local elections save everything including the full blockchain.
+ *
+ * @param elections - Map of election ID to ElectionData to save
+ */
 function saveElectionsToStorage(elections: Map<string, ElectionData>) {
   try {
+    // Object to store all elections (will be converted to JSON)
     const toStore: Record<string, any> = {};
-    let savedCount = 0;
-    let metadataOnlyCount = 0;
-    
+    // Counters for logging
+    let savedCount = 0; // Local elections saved
+    let metadataOnlyCount = 0; // Contract elections saved (metadata only)
+
+    // Iterate through each election
     for (const [id, data] of elections.entries()) {
-      const contractAddress = data.contractAddress || data.election?.contractAddress;
-      
+      // Extract contract address if it exists
+      const contractAddress =
+        data.contractAddress || data.election?.contractAddress;
+
+      // Handle contract elections (deployed to blockchain)
       if (contractAddress) {
         // Save ONLY election metadata (title, description, candidates, endTime, contractAddress)
         // Do NOT save blockchain or vote data - that comes from backend/blockchain
-        console.log(`Saving election ${id} metadata only (contract at ${contractAddress})`);
+        // This prevents localStorage tampering and ensures data integrity
+        console.log(
+          `Saving election ${id} metadata only (contract at ${contractAddress})`
+        );
         toStore[id] = {
           election: {
             id: data.election.id,
@@ -156,15 +271,14 @@ function saveElectionsToStorage(elections: Map<string, ElectionData>) {
             status: data.election.status,
             contractAddress: contractAddress,
           },
-          // Don't save blockchain or votedIds for contracts - they're on blockchain
+          // Don't save blockchain for contracts - they're on blockchain
           blockchain: null, // Will be loaded from backend
-          votedIds: [], // Not used for contracts
           contractAddress: contractAddress,
           metadataOnly: true, // Flag to indicate this is metadata-only
         };
         metadataOnlyCount++;
       } else {
-        // Local-only election - save everything
+        // Local-only election - save everything including full blockchain
         console.log(`Saving election ${id} (local-only):`, {
           title: data.election.title,
           candidates: data.election.candidates,
@@ -172,81 +286,128 @@ function saveElectionsToStorage(elections: Map<string, ElectionData>) {
         });
         toStore[id] = {
           election: data.election,
-          blockchain: data.blockchain,
-          votedIds: Array.from(data.votedIds), // Convert Set to Array for JSON
+          blockchain: data.blockchain, // Save full blockchain for local elections
           contractAddress: null,
           metadataOnly: false,
         };
         savedCount++;
       }
     }
-    
+
+    // Save to localStorage as JSON string
     localStorage.setItem(
       "blockchain_voting_elections",
       JSON.stringify(toStore)
     );
-    console.log(`Saved ${savedCount} local-only elections and ${metadataOnlyCount} contract election metadata to localStorage`);
+    // Log save summary
+    console.log(
+      `Saved ${savedCount} local-only elections and ${metadataOnlyCount} contract election metadata to localStorage`
+    );
   } catch (err) {
+    // If save fails, log error (don't crash the app)
     console.error("Error saving elections to storage:", err);
   }
 }
 
-// Listen for storage changes (when other tabs update elections)
+/**
+ * Custom hook to sync elections across browser tabs
+ *
+ * Listens for localStorage changes from other tabs and triggers a re-render.
+ * This allows elections created/updated in one tab to appear in other tabs.
+ *
+ * @returns A sync key that changes when storage is updated (triggers re-render)
+ */
 function useStorageSync() {
+  // State that increments when storage changes (used to trigger re-render)
   const [syncKey, setSyncKey] = useState(0);
 
   useEffect(() => {
     // Listen for changes from other tabs only
     // Note: storage event only fires for OTHER tabs, not the same tab
     const handleStorageChange = (e: StorageEvent) => {
+      // Check if the changed key is our elections storage key
       if (e.key === "blockchain_voting_elections") {
-        setSyncKey((prev) => prev + 1); // Trigger re-render
+        // Increment sync key to trigger re-render
+        setSyncKey((prev) => prev + 1);
       }
     };
 
+    // Add event listener for storage changes
     window.addEventListener("storage", handleStorageChange);
 
+    // Cleanup: remove event listener on unmount
     return () => {
       window.removeEventListener("storage", handleStorageChange);
     };
   }, []);
 
+  // Return the sync key (component will re-render when this changes)
   return syncKey;
 }
 
+/**
+ * Main App Component
+ *
+ * This is the root component that manages the entire application state and UI.
+ * It handles:
+ * - Election management (create, join, delete)
+ * - Vote submission (local and blockchain)
+ * - Real-time updates via Ably
+ * - Backend API integration
+ * - UI routing (HomePage vs Election view)
+ */
 function App() {
+  // State: Map of all elections (keyed by election ID)
+  // Initialize by loading from localStorage on mount
   const [elections, setElections] = useState<Map<string, ElectionData>>(() =>
     loadElectionsFromStorage()
   );
+  // State: ID of the currently active/selected election (null if on homepage)
   const [currentElectionId, setCurrentElectionId] = useState<string | null>(
     null
   );
+  // State: Whether the election ID was just copied to clipboard
   const [copiedId, setCopiedId] = useState(false);
+  // State: Currently active tab in the election view ("vote", "results", "blockchain")
   const [activeTab, setActiveTab] = useState<string>("vote");
+  // State: Whether a vote is currently being processed/mined
   const [isMining, setIsMining] = useState(false);
+  // State: Whether the backend API is connected and available
   const [backendConnected, setBackendConnected] = useState(false);
+  // State: Smart contract data (candidates and stats) fetched from backend
   const [smartContractData, setSmartContractData] = useState<{
     candidates: Candidate[];
     stats: ElectionStats | null;
   } | null>(null);
+  // State: Map of user vote status per election (for cross-device sync via Ably)
+  // Key: electionId, Value: UserVoteStatus
+  const [userVoteStatus, setUserVoteStatus] = useState<
+    Map<string, UserVoteStatus>
+  >(new Map());
 
-  // Sync with other tabs
+  // Sync with other tabs using the custom hook
   const syncKey = useStorageSync();
 
   // Use a ref to track if we're making a local update (to prevent circular updates)
+  // This prevents infinite loops when we update elections and trigger storage events
   const isLocalUpdateRef = useRef(false);
 
   // Reload elections when storage changes (from other tabs)
+  // This effect runs when syncKey changes (triggered by storage events from other tabs)
   useEffect(() => {
     // Only reload if this is a change from another tab (not a local update)
+    // syncKey > 0 means storage was changed, isLocalUpdateRef prevents circular updates
     if (syncKey > 0 && !isLocalUpdateRef.current) {
+      // Reload elections from localStorage
       const updated = loadElectionsFromStorage();
+      // Update state with reloaded elections
       setElections(updated);
     }
     // Don't reset the flag here - each function that sets it will reset it after completion
   }, [syncKey]);
 
   // Save elections whenever they change
+  // This effect automatically saves elections to localStorage whenever the elections Map changes
   useEffect(() => {
     // Always save, even if empty (to clear localStorage when all elections are deleted)
     saveElectionsToStorage(elections);
@@ -254,13 +415,25 @@ function App() {
     // The storage event will handle cross-tab updates automatically
   }, [elections]);
 
-  // Calculate currentElection first
+  // Calculate currentElection - get the election data for the currently selected election
+  // This is computed from currentElectionId and the elections Map
   const currentElection = currentElectionId
     ? elections.get(currentElectionId)
     : null;
 
-  // Check backend connection and fetch smart contract data
+  /**
+   * Check backend connection and fetch smart contract data
+   *
+   * This effect runs when the current election changes.
+   * It checks if the election has a contract address and if so:
+   * 1. Checks backend health
+   * 2. Fetches candidate vote counts from the contract
+   * 3. Fetches election statistics from the contract
+   *
+   * This ensures the UI always shows accurate blockchain data for contract elections.
+   */
   useEffect(() => {
+    // If no election is selected, reset backend connection state
     if (!currentElectionId || !currentElection) {
       setBackendConnected(false);
       setSmartContractData(null);
@@ -268,8 +441,11 @@ function App() {
     }
 
     // Check if this election has a contract address
-    const electionContractAddress = currentElection.contractAddress || currentElection.election.contractAddress;
-    
+    const electionContractAddress =
+      currentElection.contractAddress ||
+      currentElection.election.contractAddress;
+
+    // If no contract, this is a local-only election
     if (!electionContractAddress) {
       // No contract deployed for this election - use local blockchain
       setBackendConnected(false);
@@ -278,30 +454,42 @@ function App() {
     }
 
     // Check backend health asynchronously (don't block render)
+    // Use cancelled flag to prevent state updates if component unmounts
     let cancelled = false;
-    
+
     // Use setTimeout to ensure this doesn't block initial render
     const timeoutId = setTimeout(() => {
-      api.health()
+      // Check if backend is available
+      api
+        .health()
         .then(() => {
+          // If component unmounted, don't update state
           if (cancelled) return;
+          // Backend is connected
           setBackendConnected(true);
           // Fetch candidates and stats from smart contract using election-specific address
+          // Use Promise.all to fetch both in parallel
           Promise.all([
             api.getCandidates(electionContractAddress).catch(() => []),
             api.getStats(electionContractAddress).catch(() => null),
-          ]).then(([candidates, stats]) => {
-            if (!cancelled) {
-              setSmartContractData({ candidates, stats });
-            }
-          }).catch((error) => {
-            if (!cancelled) {
-              console.error("Error fetching smart contract data:", error);
-              setSmartContractData(null);
-            }
-          });
+          ])
+            .then(([candidates, stats]) => {
+              // If component unmounted, don't update state
+              if (!cancelled) {
+                // Update state with fetched contract data
+                setSmartContractData({ candidates, stats });
+              }
+            })
+            .catch((error) => {
+              // If component unmounted, don't update state
+              if (!cancelled) {
+                console.error("Error fetching smart contract data:", error);
+                setSmartContractData(null);
+              }
+            });
         })
         .catch((error) => {
+          // If component unmounted, don't update state
           if (!cancelled) {
             console.warn("Backend not connected:", error);
             setBackendConnected(false);
@@ -309,12 +497,133 @@ function App() {
           }
         });
     }, 100); // Small delay to ensure render happens first
-    
+
+    // Cleanup function: cancel any pending operations if component unmounts
     return () => {
       cancelled = true;
       clearTimeout(timeoutId);
     };
   }, [currentElectionId, currentElection]);
+
+  /**
+   * Subscribe to real-time updates and sync vote status across devices
+   *
+   * This effect sets up Ably subscriptions for:
+   * 1. Vote events - when any user casts a vote
+   * 2. Stats updates - when election statistics change
+   * 3. User vote status - for cross-device synchronization
+   *
+   * It also:
+   * - Enters presence to show the user is active
+   * - Loads saved vote status from localStorage
+   * - Syncs vote status across devices using the same userSessionId
+   */
+  useEffect(() => {
+    // If no election is selected, don't set up subscriptions
+    if (!currentElectionId || !currentElection) {
+      return;
+    }
+
+    // Get or create user session ID (persists across devices via localStorage)
+    const userSessionId = getUserSessionId();
+    console.log(
+      "[ABLY] Setting up real-time subscription for election:",
+      currentElectionId
+    );
+    console.log("[ABLY] User session ID:", userSessionId);
+
+    // Enter presence to show user is active on this election channel
+    // Returns a cleanup function to leave presence when component unmounts
+    const leavePresence = enterPresence(currentElectionId, userSessionId);
+
+    // Check if this user session has voted (from localStorage)
+    const voteStatusKey = `election_${currentElectionId}_user_${userSessionId}`;
+    const storedVoteStatus = localStorage.getItem(voteStatusKey);
+    if (storedVoteStatus) {
+      try {
+        const status: UserVoteStatus = JSON.parse(storedVoteStatus);
+        setUserVoteStatus((prev) =>
+          new Map(prev).set(currentElectionId, status)
+        );
+        console.log("[ABLY] Loaded vote status from localStorage:", status);
+      } catch (e) {
+        console.error("[ABLY] Failed to parse stored vote status:", e);
+      }
+    }
+
+    const unsubscribe = subscribeToElectionUpdates(
+      currentElectionId,
+      // onVote callback - when any user casts a vote
+      (voteData) => {
+        console.log("[ABLY] Vote received from another client:", voteData);
+
+        // If this is our vote from another device, update local state
+        if (voteData.userSessionId === userSessionId) {
+          console.log("[ABLY] This is our vote from another device!");
+          const status: UserVoteStatus = {
+            userSessionId: voteData.userSessionId,
+            hasVoted: true,
+            votedCandidate: voteData.candidate,
+            votedAt: voteData.timestamp,
+          };
+          setUserVoteStatus((prev) =>
+            new Map(prev).set(currentElectionId, status)
+          );
+          localStorage.setItem(voteStatusKey, JSON.stringify(status));
+        }
+
+        toast.success(`New vote cast for ${voteData.candidate}!`);
+
+        // Refresh contract data if available
+        const electionContractAddress =
+          currentElection.contractAddress ||
+          currentElection.election.contractAddress;
+        if (electionContractAddress && backendConnected) {
+          Promise.all([
+            api.getCandidates(electionContractAddress).catch(() => []),
+            api.getStats(electionContractAddress).catch(() => null),
+          ])
+            .then(([candidates, stats]) => {
+              setSmartContractData({ candidates, stats });
+            })
+            .catch((error) => {
+              console.error("Error refreshing contract data:", error);
+            });
+        }
+      },
+      // onStats callback
+      (statsData) => {
+        console.log("[ABLY] Stats update received:", statsData);
+        setSmartContractData({
+          candidates: statsData.candidates || [],
+          stats: {
+            totalVoters: statsData.totalVoters,
+            maxAllowedVoters: statsData.maxAllowedVoters,
+            remainingVoters: statsData.remainingVoters,
+            isActive: statsData.isActive,
+            timeRemaining: statsData.timeRemaining,
+          },
+        });
+      },
+      // onUserVoteStatus callback - sync vote status across devices
+      (statusData) => {
+        console.log("[ABLY] User vote status received:", statusData);
+
+        // Only update if it's for our user session
+        if (statusData.userSessionId === userSessionId) {
+          setUserVoteStatus((prev) =>
+            new Map(prev).set(currentElectionId, statusData)
+          );
+          localStorage.setItem(voteStatusKey, JSON.stringify(statusData));
+        }
+      }
+    );
+
+    return () => {
+      unsubscribe();
+      leavePresence();
+    };
+  }, [currentElectionId, currentElection, backendConnected]);
 
   function createGenesisBlock(): Block {
     const genesisBlock = {
@@ -364,14 +673,18 @@ function App() {
 
       // Calculate duration in hours
       const durationMs = electionData.endTime - Date.now();
-      const durationHours = Math.max(1, Math.ceil(durationMs / (1000 * 60 * 60)));
+      const durationHours = Math.max(
+        1,
+        Math.ceil(durationMs / (1000 * 60 * 60))
+      );
 
       let contractAddress: string | undefined = undefined;
+      let deployResult: { contractAddress: string; transactionHash: string } | undefined = undefined;
 
       // Try to deploy contract if backend is available
       try {
         console.log("Attempting to deploy contract to blockchain...");
-        const deployResult = await api.deployContract(
+        deployResult = await api.deployContract(
           electionData.candidates,
           100, // maxVoters
           durationHours
@@ -380,7 +693,10 @@ function App() {
         console.log("Contract deployed successfully:", contractAddress);
         toast.success("Election deployed to blockchain!");
       } catch (error) {
-        console.warn("Failed to deploy contract, using local blockchain:", error);
+        console.warn(
+          "Failed to deploy contract, using local blockchain:",
+          error
+        );
         // Continue with local blockchain - don't fail the election creation
         toast.info("Using local blockchain (backend not available)");
       }
@@ -392,11 +708,31 @@ function App() {
         status: "active",
         contractAddress, // Store contract address if deployed
       };
-      
+
+      // Create genesis block - if contract was deployed, include deployment info
+      let genesisBlock: Block;
+      if (contractAddress && deployResult) {
+        // Genesis block with contract deployment info
+        genesisBlock = {
+          index: 0,
+          timestamp: Date.now(),
+          votes: [],
+          previousHash: "0",
+          hash: "",
+          nonce: 0,
+          transactionHash: deployResult.transactionHash,
+          blockType: 'deployment',
+          contractAddress: contractAddress,
+        };
+        genesisBlock.hash = calculateHash(genesisBlock);
+      } else {
+        // Regular genesis block for local elections
+        genesisBlock = createGenesisBlock();
+      }
+
       const newElectionData: ElectionData = {
         election,
-        blockchain: [createGenesisBlock()],
-        votedIds: new Set(),
+        blockchain: [genesisBlock],
         contractAddress, // Store here too
       };
 
@@ -581,119 +917,198 @@ function App() {
     }
 
     // Get contract address for this election
-    const electionContractAddress = currentElection.contractAddress || currentElection.election.contractAddress;
-    
+    const electionContractAddress =
+      currentElection.contractAddress ||
+      currentElection.election.contractAddress;
+
     // Try to use backend if connected and contract is deployed, otherwise fall back to local
     if (backendConnected && electionContractAddress) {
       setIsMining(true);
       try {
         // Note: With anonymous voting, we can't check if a voter ID has voted
-        // because addresses are random. We rely on frontend sessionStorage tracking
+        // because addresses are random. We rely on Ably cross-device sync
         // and the contract's address-based duplicate prevention
 
         // Call backend API to vote on real blockchain
-        const result = await api.vote(candidate, voterId, electionContractAddress);
-        
-        setIsMining(false);
-        
-        // Create the vote object for local blockchain (anonymized - no voter ID stored)
-        const newVote: Vote = {
-          voterId: "ANONYMOUS", // Don't store actual voter ID for anonymity
+        const result = await api.vote(
           candidate,
-          timestamp: Date.now(),
-        };
-
-        // Add vote to local blockchain so UI updates immediately
-        const lastBlock = currentElection.blockchain[currentElection.blockchain.length - 1];
-        const newBlockIndex = lastBlock.index + 1;
-        console.log(
-          `[BACKEND VOTE] Creating new block #${newBlockIndex}. Current blockchain length: ${currentElection.blockchain.length}`
+          voterId,
+          electionContractAddress
         );
-        
-        const newBlock: Block = {
-          index: newBlockIndex,
-          timestamp: Date.now(),
-          votes: [newVote],
-          previousHash: lastBlock.hash,
-          hash: "",
-          nonce: 0,
-        };
 
-        // Mine the block (fast with difficulty 2)
-        const minedBlock = mineBlock(newBlock);
-        const updatedBlockchain = [...currentElection.blockchain, minedBlock];
-        
-        console.log(
-          `[BACKEND VOTE] Blockchain updated. New length: ${updatedBlockchain.length}, New block index: ${minedBlock.index}`
-        );
-        
-        // Mark this tab as having voted (per-tab tracking)
-        // Note: For backend votes, the contract prevents duplicate addresses
-        // but we still track per-tab to prevent UI confusion
-        sessionStorage.setItem(`election_${currentElectionId}_tab_voted`, "true");
-        sessionStorage.setItem(`election_${currentElectionId}_tab_voter_id`, voterId);
-        
-        // Update local state to track this vote AND update blockchain
-        const updatedElection: ElectionData = {
-          ...currentElection,
-          blockchain: updatedBlockchain,
-          // Don't update votedIds Set - backend contract handles duplicate prevention
-          votedIds: currentElection.votedIds, // Keep existing (for backwards compatibility)
-        };
-        
-        isLocalUpdateRef.current = true;
-        setElections((prev) => {
-          const newMap = new Map(prev);
-          newMap.set(currentElectionId!, updatedElection);
-          return newMap;
-        });
-        setTimeout(() => {
-          isLocalUpdateRef.current = false;
-        }, 200);
-        
-        // Refresh smart contract data
-        try {
-          const [candidates, stats] = await Promise.all([
-            api.getCandidates(electionContractAddress),
-            api.getStats(electionContractAddress),
-          ]);
-          setSmartContractData({ candidates, stats });
-        } catch (error) {
-          console.error("Error refreshing contract data:", error);
+        setIsMining(false);
+
+        // Add a block to the blockchain display for this vote transaction
+        if (currentElectionId && currentElection) {
+          const lastBlock = currentElection.blockchain[currentElection.blockchain.length - 1];
+          const newBlockIndex = lastBlock ? lastBlock.index + 1 : 1;
+          
+          const voteBlock: Block = {
+            index: newBlockIndex,
+            timestamp: Date.now(),
+            votes: [{
+              voterId: "ANONYMOUS",
+              candidate: candidate,
+              timestamp: Date.now(),
+            }],
+            previousHash: lastBlock ? lastBlock.hash : "0",
+            hash: "",
+            nonce: 0,
+            transactionHash: result.transactionHash,
+            blockType: 'vote',
+          };
+          voteBlock.hash = calculateHash(voteBlock);
+
+          // Update the blockchain with the new vote block
+          const updatedBlockchain = [...currentElection.blockchain, voteBlock];
+          const updatedElection: ElectionData = {
+            ...currentElection,
+            blockchain: updatedBlockchain,
+          };
+
+          // Mark as local update to prevent circular sync
+          isLocalUpdateRef.current = true;
+          setElections((prev) => {
+            const newMap = new Map(prev);
+            newMap.set(currentElectionId, updatedElection);
+            return newMap;
+          });
+          setTimeout(() => {
+            isLocalUpdateRef.current = false;
+          }, 200);
         }
-        
+
+        // Publish vote event to Ably for real-time updates (immediate)
+        if (currentElectionId) {
+          const userSessionId = getUserSessionId();
+          publishVoteEvent(currentElectionId, {
+            candidate,
+            voterId: "ANONYMOUS",
+            userSessionId: userSessionId,
+            timestamp: Date.now(),
+            transactionHash: result.transactionHash,
+          });
+
+          // Publish user vote status for cross-device sync (immediate)
+          const voteStatus: UserVoteStatus = {
+            userSessionId: userSessionId,
+            hasVoted: true,
+            votedCandidate: candidate,
+            votedAt: Date.now(),
+          };
+          publishUserVoteStatus(currentElectionId, voteStatus);
+          setUserVoteStatus((prev) =>
+            new Map(prev).set(currentElectionId, voteStatus)
+          );
+          localStorage.setItem(
+            `election_${currentElectionId}_user_${userSessionId}`,
+            JSON.stringify(voteStatus)
+          );
+        }
+
+        // Wait for transaction to be mined and blockchain state to update before refreshing
+        // Backend waits for receipt, but contract state may take a moment to update on Sepolia
+        console.log("[VOTE] Waiting for blockchain state to update before refreshing...");
+        setTimeout(async () => {
+          console.log("[VOTE] Attempting to refresh contract data (first attempt)...");
+          try {
+            const [candidates, stats] = await Promise.all([
+              api.getCandidates(electionContractAddress),
+              api.getStats(electionContractAddress),
+            ]);
+            console.log("[VOTE] Contract data refreshed:", { candidates, stats });
+            setSmartContractData({ candidates, stats });
+            
+            // Publish updated stats to Ably with fresh data
+            if (currentElectionId && candidates) {
+              console.log("[VOTE] Publishing stats update to Ably");
+              publishStatsEvent(currentElectionId, {
+                candidates: candidates,
+                totalVoters: stats?.totalVoters || "0",
+                maxAllowedVoters: stats?.maxAllowedVoters || "0",
+                remainingVoters: stats?.remainingVoters || "0",
+                isActive: stats?.isActive || true,
+                timeRemaining: stats?.timeRemaining || "0",
+              });
+            }
+          } catch (error) {
+            console.error("[VOTE] Error refreshing contract data (first attempt):", error);
+            // Retry once after another delay - Sepolia can be slow
+            setTimeout(async () => {
+              console.log("[VOTE] Retrying contract data refresh...");
+              try {
+                const [candidates, stats] = await Promise.all([
+                  api.getCandidates(electionContractAddress),
+                  api.getStats(electionContractAddress),
+                ]);
+                console.log("[VOTE] Contract data refreshed (retry):", { candidates, stats });
+                setSmartContractData({ candidates, stats });
+                
+                // Publish stats with retried data
+                if (currentElectionId && candidates) {
+                  console.log("[VOTE] Publishing stats update to Ably (retry)");
+                  publishStatsEvent(currentElectionId, {
+                    candidates: candidates,
+                    totalVoters: stats?.totalVoters || "0",
+                    maxAllowedVoters: stats?.maxAllowedVoters || "0",
+                    remainingVoters: stats?.remainingVoters || "0",
+                    isActive: stats?.isActive || true,
+                    timeRemaining: stats?.timeRemaining || "0",
+                  });
+                }
+              } catch (retryError) {
+                console.error("[VOTE] Error refreshing contract data (retry failed):", retryError);
+                // Final retry after longer delay
+                setTimeout(async () => {
+                  console.log("[VOTE] Final retry for contract data refresh...");
+                  try {
+                    const [candidates, stats] = await Promise.all([
+                      api.getCandidates(electionContractAddress),
+                      api.getStats(electionContractAddress),
+                    ]);
+                    console.log("[VOTE] Contract data refreshed (final retry):", { candidates, stats });
+                    setSmartContractData({ candidates, stats });
+                  } catch (finalError) {
+                    console.error("[VOTE] All refresh attempts failed:", finalError);
+                  }
+                }, 3000);
+              }
+            }, 3000); // Increased retry delay for Sepolia
+          }
+        }, 3000); // Increased initial delay for Sepolia testnet (was 2000ms)
+
         return {
           success: true,
-          message: `Vote for ${candidate} recorded successfully on the blockchain! Transaction: ${result.transactionHash.slice(0, 10)}...`,
+          message: `Vote for ${candidate} recorded successfully on the blockchain! Transaction: ${result.transactionHash.slice(
+            0,
+            10
+          )}...`,
         };
       } catch (error) {
         setIsMining(false);
         return {
           success: false,
-          message: error instanceof Error ? error.message : "Failed to submit vote to blockchain",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Failed to submit vote to blockchain",
         };
       }
     } else {
       // Fallback to local blockchain simulation
       console.log("Backend not connected, using local blockchain simulation");
-      
-      // Use sessionStorage to check if THIS TAB has voted (per-tab tracking)
-      // This allows each tab to vote independently
-      const tabVoteKey = `election_${currentElectionId}_tab_voted`;
-      const hasTabVoted = sessionStorage.getItem(tabVoteKey);
-      
-      if (hasTabVoted) {
-        console.log("This tab has already voted (sessionStorage check)");
-        return { success: false, message: "You have already voted in this tab!" };
-      }
-      
-      // Also check if this specific voter ID was used in this tab
-      const tabVoterIdKey = `election_${currentElectionId}_tab_voter_id`;
-      const tabVoterId = sessionStorage.getItem(tabVoterIdKey);
-      
-      if (tabVoterId === voterId) {
-        console.log("This voter ID was already used in this tab");
-        return { success: false, message: "This voter ID has already voted in this tab!" };
+
+      // Check if user has voted using Ably sync (cross-device)
+      if (currentElectionId) {
+        const userSessionId = getUserSessionId();
+        const userStatus = userVoteStatus.get(currentElectionId);
+        if (
+          userStatus &&
+          userStatus.userSessionId === userSessionId &&
+          userStatus.hasVoted
+        ) {
+          return { success: false, message: "You have already voted!" };
+        }
       }
 
       setIsMining(true);
@@ -736,15 +1151,10 @@ function App() {
               console.log(
                 `Blockchain updated. New length: ${updatedBlockchain.length}, New block index: ${minedBlock.index}`
               );
-              // Mark this tab as having voted (per-tab tracking)
-              sessionStorage.setItem(`election_${currentElectionId}_tab_voted`, "true");
-              sessionStorage.setItem(`election_${currentElectionId}_tab_voter_id`, voterId);
-              
+
               const updatedElection: ElectionData = {
                 ...currentElection,
                 blockchain: updatedBlockchain,
-                // Don't update votedIds Set - use sessionStorage instead for per-tab tracking
-                votedIds: currentElection.votedIds, // Keep existing (for backwards compatibility)
               };
 
               // Mark as local update to prevent circular sync
@@ -762,6 +1172,62 @@ function App() {
                 isLocalUpdateRef.current = false;
               }, 200);
 
+              // Publish vote event to Ably for real-time updates
+              if (currentElectionId) {
+                const userSessionId = getUserSessionId();
+                publishVoteEvent(currentElectionId, {
+                  candidate,
+                  voterId: "ANONYMOUS",
+                  userSessionId: userSessionId,
+                  timestamp: Date.now(),
+                });
+
+                // Publish user vote status for cross-device sync
+                const voteStatus: UserVoteStatus = {
+                  userSessionId: userSessionId,
+                  hasVoted: true,
+                  votedCandidate: candidate,
+                  votedAt: Date.now(),
+                };
+                publishUserVoteStatus(currentElectionId, voteStatus);
+                setUserVoteStatus((prev) =>
+                  new Map(prev).set(currentElectionId, voteStatus)
+                );
+                localStorage.setItem(
+                  `election_${currentElectionId}_user_${userSessionId}`,
+                  JSON.stringify(voteStatus)
+                );
+
+                // Calculate and publish stats
+                const updatedVotes = updatedBlockchain.flatMap(
+                  (block) => block.votes
+                );
+                const voteCounts = updatedVotes.reduce((acc, vote) => {
+                  acc[vote.candidate] = (acc[vote.candidate] || 0) + 1;
+                  return acc;
+                }, {} as Record<string, number>);
+
+                const candidates = currentElection.election.candidates.map(
+                  (name) => ({
+                    name,
+                    voteCount: String(voteCounts[name] || 0),
+                  })
+                );
+
+                publishStatsEvent(currentElectionId, {
+                  candidates,
+                  totalVoters: String(updatedVotes.length),
+                  maxAllowedVoters: "100",
+                  remainingVoters: String(
+                    Math.max(0, 100 - updatedVotes.length)
+                  ),
+                  isActive: currentElection.election.status === "active",
+                  timeRemaining: String(
+                    Math.max(0, currentElection.election.endTime - Date.now())
+                  ),
+                });
+              }
+
               // Set mining to false after a small delay to show completion
               setTimeout(() => {
                 setIsMining(false);
@@ -777,71 +1243,17 @@ function App() {
     }
   }
 
-  // For contract elections, reconstruct blockchain from backend vote data
+  // For contract elections, use stored blockchain (or genesis if empty)
   // For local elections, use the stored blockchain
   const blockchain = useMemo(() => {
     if (!currentElection) return [];
-    
-    const hasContract = currentElection.contractAddress || currentElection.election.contractAddress;
-    
-    // If contract exists and backend is connected, reconstruct blocks from backend votes
-    if (hasContract && backendConnected && smartContractData?.candidates) {
-      // Get all votes from backend data
-      const votes: Vote[] = [];
-      for (const candidate of smartContractData.candidates) {
-        const count = parseInt(candidate.voteCount);
-        for (let i = 0; i < count; i++) {
-          votes.push({
-            voterId: "ANONYMOUS",
-            candidate: candidate.name,
-            timestamp: (currentElection.election.createdAt || Date.now()) + (i * 1000), // Spread timestamps
-          });
-        }
-      }
-      
-      // If no votes, return just genesis block
-      if (votes.length === 0) {
-        return currentElection.blockchain.length > 0 
-          ? currentElection.blockchain 
-          : [createGenesisBlock()];
-      }
-      
-      // Reconstruct blocks from votes
-      // Each vote gets its own block for maximum transparency
-      const blocks: Block[] = [];
-      
-      // Start with genesis block
-      const genesisBlock = currentElection.blockchain[0] || createGenesisBlock();
-      blocks.push(genesisBlock);
-      
-      // Create one block per vote for transparency
-      for (let i = 0; i < votes.length; i++) {
-        const vote = votes[i];
-        const previousBlock = blocks[blocks.length - 1];
-        
-        const newBlock: Block = {
-          index: blocks.length,
-          timestamp: vote.timestamp,
-          votes: [vote], // One vote per block
-          previousHash: previousBlock.hash,
-          hash: "",
-          nonce: 0,
-        };
-        
-        // Mine the block
-        const minedBlock = mineBlock(newBlock);
-        blocks.push(minedBlock);
-      }
-      
-      console.log(`[BLOCKCHAIN] Reconstructed ${blocks.length} blocks from ${votes.length} backend votes`);
-      return blocks;
-    }
-    
-    // For local elections or when backend not connected, use stored blockchain
-    return currentElection.blockchain.length > 0 
-      ? currentElection.blockchain 
+
+    // For all elections, use stored blockchain (contract elections don't store blockchain locally)
+    // The blockchain viewer will show the stored blocks or just genesis for contract elections
+    return currentElection.blockchain.length > 0
+      ? currentElection.blockchain
       : [createGenesisBlock()];
-  }, [currentElection, backendConnected, smartContractData, currentElection?.contractAddress]);
+  }, [currentElection]);
 
   // Memoize expensive calculations to prevent re-computation on every render
   const isChainValid = useMemo(() => {
@@ -860,34 +1272,16 @@ function App() {
     return true;
   }, [blockchain]);
 
-  // SOLUTION 5: For elections with contracts, use backend data instead of localStorage
+  // For contract elections, use backend vote counts directly (no reconstruction needed)
+  // For local elections, use blockchain data
   const allVotes = useMemo(() => {
     if (!currentElection) return [];
-    
-    const hasContract = currentElection.contractAddress || currentElection.election.contractAddress;
-    
-    // If contract exists and backend is connected, create votes from backend data
-    if (hasContract && backendConnected && smartContractData?.candidates) {
-      // Create vote objects from backend vote counts (for display purposes)
-      // This ensures results match blockchain data, not localStorage
-      const votes: Vote[] = [];
-      for (const candidate of smartContractData.candidates) {
-        const count = parseInt(candidate.voteCount);
-        // Create one vote object per vote count (for display)
-        for (let i = 0; i < count; i++) {
-          votes.push({
-            voterId: "ANONYMOUS",
-            candidate: candidate.name,
-            timestamp: Date.now() - (count - i) * 1000, // Spread timestamps
-          });
-        }
-      }
-      return votes;
-    }
-    
-    // No contract or backend not connected - use local blockchain data
+
+    // For contract elections, we don't reconstruct votes - just use blockchain data from backend
+    // The VoteResults component will use candidatesWithVotes which has the real counts
+    // For local elections, use the stored blockchain
     return currentElection.blockchain.flatMap((block) => block.votes);
-  }, [currentElection?.blockchain, currentElection?.contractAddress, backendConnected, smartContractData]);
+  }, [currentElection?.blockchain]);
 
   // Memoize candidate vote counts
   // SOLUTION 5: Always use backend data when contract exists (ignore localStorage tampering)
@@ -896,60 +1290,72 @@ function App() {
       console.log("No currentElection, returning empty candidates");
       return [];
     }
-    
+
     const localCandidates = currentElection.election.candidates;
-    const hasContract = currentElection.contractAddress || currentElection.election.contractAddress;
-    
+    const hasContract =
+      currentElection.contractAddress ||
+      currentElection.election.contractAddress;
+
     console.log("=== Candidates Calculation ===");
     console.log("Local election candidates:", localCandidates);
     console.log("Has contract:", hasContract);
     console.log("Backend connected:", backendConnected);
     console.log("Backend candidates:", smartContractData?.candidates);
-    
+
     // SOLUTION 5: If contract exists, ONLY use backend data (ignore localStorage)
     if (hasContract && backendConnected && smartContractData?.candidates) {
-      console.log("Using backend data only (contract exists - localStorage ignored for security)");
-      
+      console.log(
+        "Using backend data only (contract exists - localStorage ignored for security)"
+      );
+
       // Create a map of backend candidates
       const backendCandidatesMap = new Map(
-        smartContractData.candidates.map(c => [c.name, c.voteCount])
+        smartContractData.candidates.map((c) => [c.name, c.voteCount])
       );
-      
+
       // Use backend vote counts for all candidates
       const result = localCandidates.map((name) => {
         const backendVoteCount = backendCandidatesMap.get(name);
         // If candidate exists in backend, use backend count, otherwise 0
         return {
           name,
-          voteCount: backendVoteCount !== undefined ? backendVoteCount : "0"
+          voteCount: backendVoteCount !== undefined ? backendVoteCount : "0",
         };
       });
-      
+
       console.log("Backend-only candidates result:", result);
       console.log("=============================");
       return result;
     }
-    
+
     // Contract exists but backend not connected - show warning
     if (hasContract && !backendConnected) {
-      console.warn("Contract exists but backend not connected - cannot verify vote counts");
+      console.warn(
+        "Contract exists but backend not connected - cannot verify vote counts"
+      );
       return localCandidates.map((name) => ({
         name,
-        voteCount: "N/A" // Can't verify without backend
+        voteCount: "N/A", // Can't verify without backend
       }));
     }
-    
+
     // No contract - use local calculation (local-only election)
     console.log("No contract - using local vote counts (local-only election)");
     const result = localCandidates.map((name) => ({
       name,
       voteCount: String(allVotes.filter((v) => v.candidate === name).length),
     }));
-    
+
     console.log("Local candidates result:", result);
     console.log("=============================");
     return result;
-  }, [backendConnected, smartContractData, currentElection?.election.candidates, currentElection?.contractAddress, allVotes]);
+  }, [
+    backendConnected,
+    smartContractData,
+    currentElection?.election.candidates,
+    currentElection?.contractAddress,
+    allVotes,
+  ]);
 
   function copyElectionId() {
     if (currentElectionId) {
@@ -989,7 +1395,11 @@ function App() {
 
   // Automatically switch to results tab for closed elections
   useEffect(() => {
-    if (currentElection && (currentElection.election.status === "closed" || Date.now() > currentElection.election.endTime)) {
+    if (
+      currentElection &&
+      (currentElection.election.status === "closed" ||
+        Date.now() > currentElection.election.endTime)
+    ) {
       if (activeTab === "vote") {
         setActiveTab("results");
       }
@@ -999,8 +1409,10 @@ function App() {
   // SOLUTION 5: Validate localStorage data against backend (detect tampering)
   useEffect(() => {
     if (!currentElection || !backendConnected) return;
-    
-    const contractAddress = currentElection.contractAddress || currentElection.election.contractAddress;
+
+    const contractAddress =
+      currentElection.contractAddress ||
+      currentElection.election.contractAddress;
     if (!contractAddress || !smartContractData?.candidates) return;
 
     // Calculate local vote counts from localStorage
@@ -1015,13 +1427,13 @@ function App() {
     for (const backendCandidate of smartContractData.candidates) {
       const localCount = localCounts[backendCandidate.name] || 0;
       const backendCount = parseInt(backendCandidate.voteCount);
-      
+
       if (localCount !== backendCount) {
         mismatchDetected = true;
         console.warn(
           `[TAMPERING DETECTED] Vote count mismatch for "${backendCandidate.name}": ` +
-          `Local=${localCount}, Blockchain=${backendCount}. ` +
-          `Using blockchain data (localStorage ignored).`
+            `Local=${localCount}, Blockchain=${backendCount}. ` +
+            `Using blockchain data (localStorage ignored).`
         );
       }
     }
@@ -1048,7 +1460,14 @@ function App() {
     } catch (error) {
       console.error("Error rendering HomePage:", error);
       return (
-        <div style={{ padding: "2rem", color: "white", background: "#1a1a1a", minHeight: "100vh" }}>
+        <div
+          style={{
+            padding: "2rem",
+            color: "white",
+            background: "#1a1a1a",
+            minHeight: "100vh",
+          }}
+        >
           <h1>Error Loading Homepage</h1>
           <p>{error instanceof Error ? error.message : String(error)}</p>
           <p>Check browser console (F12) for details.</p>
@@ -1081,8 +1500,6 @@ function App() {
     "Election:",
     currentElection.election.title
   );
-
-  const votedIds = currentElection.votedIds;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-purple-950 to-slate-900">
@@ -1143,19 +1560,25 @@ function App() {
             </div>
           </div>
           <div className="mb-4">
-            <div className={`p-3 border rounded-lg flex items-center gap-2 ${
-              backendConnected 
-                ? "bg-green-500/10 border-green-500/30" 
-                : "bg-yellow-500/10 border-yellow-500/30"
-            }`}>
-              <div className={`w-2 h-2 rounded-full ${
-                backendConnected ? "bg-green-500" : "bg-yellow-500"
-              }`}></div>
-              <span className={`text-sm ${
-                backendConnected ? "text-green-300" : "text-yellow-300"
-              }`}>
-                {backendConnected 
-                  ? "✓ Connected to Real Blockchain" 
+            <div
+              className={`p-3 border rounded-lg flex items-center gap-2 ${
+                backendConnected
+                  ? "bg-green-500/10 border-green-500/30"
+                  : "bg-yellow-500/10 border-yellow-500/30"
+              }`}
+            >
+              <div
+                className={`w-2 h-2 rounded-full ${
+                  backendConnected ? "bg-green-500" : "bg-yellow-500"
+                }`}
+              ></div>
+              <span
+                className={`text-sm ${
+                  backendConnected ? "text-green-300" : "text-yellow-300"
+                }`}
+              >
+                {backendConnected
+                  ? "✓ Connected to Real Blockchain"
                   : "⚠️ Local Blockchain Mode - Backend not connected"}
               </span>
             </div>
@@ -1229,21 +1652,34 @@ function App() {
         </div>
 
         <Tabs
-          defaultValue={currentElection.election.status === "closed" || Date.now() > currentElection.election.endTime ? "results" : "vote"}
+          defaultValue={
+            currentElection.election.status === "closed" ||
+            Date.now() > currentElection.election.endTime
+              ? "results"
+              : "vote"
+          }
           value={activeTab}
           onValueChange={setActiveTab}
           className="space-y-6"
         >
-          <TabsList className={`grid w-full ${currentElection.election.status === "closed" || Date.now() > currentElection.election.endTime ? "grid-cols-2" : "grid-cols-3"} max-w-2xl bg-slate-800/50 border border-slate-700`}>
-            {(currentElection.election.status === "active" && Date.now() <= currentElection.election.endTime) && (
-              <TabsTrigger
-                value="vote"
-                className="flex items-center gap-2 data-[state=active]:bg-purple-600"
-              >
-                <Vote className="w-4 h-4" />
-                Cast Vote
-              </TabsTrigger>
-            )}
+          <TabsList
+            className={`grid w-full ${
+              currentElection.election.status === "closed" ||
+              Date.now() > currentElection.election.endTime
+                ? "grid-cols-2"
+                : "grid-cols-3"
+            } max-w-2xl bg-slate-800/50 border border-slate-700`}
+          >
+            {currentElection.election.status === "active" &&
+              Date.now() <= currentElection.election.endTime && (
+                <TabsTrigger
+                  value="vote"
+                  className="flex items-center gap-2 data-[state=active]:bg-purple-600"
+                >
+                  <Vote className="w-4 h-4" />
+                  Cast Vote
+                </TabsTrigger>
+              )}
             <TabsTrigger
               value="results"
               className="flex items-center gap-2 data-[state=active]:bg-purple-600"
@@ -1260,48 +1696,46 @@ function App() {
             </TabsTrigger>
           </TabsList>
 
-          {(currentElection.election.status === "active" && Date.now() <= currentElection.election.endTime) && (
-            <TabsContent value="vote">
-              <VotingInterface
-                onVote={async (candidate: string, voterAddress: string) => {
-                  const result = await addVote(voterAddress, candidate);
-                  if (result.success) {
-                    // Store voter ID in sessionStorage (per-tab) to track if this tab has voted
-                    // sessionStorage is unique per tab, so each tab can vote independently
-                    sessionStorage.setItem(
-                      `election_${currentElectionId}_voter`,
-                      voterAddress
+          {currentElection.election.status === "active" &&
+            Date.now() <= currentElection.election.endTime && (
+              <TabsContent value="vote">
+                <VotingInterface
+                  onVote={async (candidate: string, voterAddress: string) => {
+                    const result = await addVote(voterAddress, candidate);
+                    if (result.success) {
+                      // Switch to results tab after successful vote
+                      setTimeout(() => {
+                        setActiveTab("results");
+                        toast.success("View your vote in the Results tab!");
+                      }, 1500);
+                    }
+                    return result;
+                  }}
+                  hasVoted={(() => {
+                    if (!currentElectionId) return false;
+
+                    // Check user vote status (cross-device sync via Ably)
+                    const userSessionId = getUserSessionId();
+                    const userStatus = userVoteStatus.get(currentElectionId);
+                    return !!(
+                      userStatus &&
+                      userStatus.userSessionId === userSessionId &&
+                      userStatus.hasVoted
                     );
-                    // Switch to results tab after successful vote
-                    setTimeout(() => {
-                      setActiveTab("results");
-                      toast.success("View your vote in the Results tab!");
-                    }, 1500);
-                  }
-                  return result;
-                }}
-                hasVoted={(() => {
-                  // Use sessionStorage to check if THIS TAB has voted
-                  // This is per-tab, so each tab can vote independently
-                  const tabVoteKey = `election_${currentElectionId}_tab_voted`;
-                  const hasTabVoted = sessionStorage.getItem(tabVoteKey);
-                  
-                  // Also check the legacy key for backwards compatibility
-                  const storedVoter = sessionStorage.getItem(
-                    `election_${currentElectionId}_voter`
-                  );
-                  
-                  return !!(hasTabVoted || storedVoter);
-                })()}
-                candidates={candidatesWithVotes}
-                voterAddress={undefined}
-                isMining={isMining}
-              />
-            </TabsContent>
-          )}
+                  })()}
+                  candidates={candidatesWithVotes}
+                  voterAddress={undefined}
+                  isMining={isMining}
+                />
+              </TabsContent>
+            )}
 
           <TabsContent value="results">
-            <VoteResults votes={allVotes} />
+            <VoteResults 
+              votes={allVotes} 
+              candidatesWithVotes={candidatesWithVotes}
+              hasContract={!!(currentElection?.contractAddress || currentElection?.election.contractAddress)}
+            />
           </TabsContent>
 
           <TabsContent value="blockchain">

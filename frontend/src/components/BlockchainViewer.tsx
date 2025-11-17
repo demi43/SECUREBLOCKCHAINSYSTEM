@@ -12,6 +12,12 @@ export interface Block {
   previousHash: string;
   hash: string;
   nonce: number;
+  // Optional: Transaction hash from blockchain (for contract elections)
+  transactionHash?: string;
+  // Optional: Block type (genesis, vote, deployment)
+  blockType?: 'genesis' | 'vote' | 'deployment';
+  // Optional: Contract address (for genesis/deployment blocks)
+  contractAddress?: string;
 }
 
 interface BlockchainViewerProps {
@@ -57,12 +63,20 @@ export function BlockchainViewer({ blocks, isValid }: BlockchainViewerProps) {
             <CardHeader>
               <CardTitle className="flex items-center justify-between">
                 <span>Block #{block.index}</span>
-                {block.index === 0 && (
-                  <span className="genesis-badge">Genesis Block</span>
-                )}
+                <div className="flex items-center gap-2">
+                  {block.blockType === 'deployment' && (
+                    <span className="genesis-badge">Contract Deployment</span>
+                  )}
+                  {block.blockType === 'vote' && (
+                    <span className="genesis-badge" style={{ backgroundColor: '#10b981' }}>Vote Transaction</span>
+                  )}
+                  {block.index === 0 && !block.blockType && (
+                    <span className="genesis-badge">Genesis Block</span>
+                  )}
+                </div>
               </CardTitle>
               <CardDescription>
-                Mined at {new Date(block.timestamp).toLocaleString()}
+                {block.blockType === 'deployment' ? 'Contract deployed' : block.blockType === 'vote' ? 'Vote cast' : 'Mined'} at {new Date(block.timestamp).toLocaleString()}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -79,6 +93,38 @@ export function BlockchainViewer({ blocks, isValid }: BlockchainViewerProps) {
                   <span className="block-label">Nonce:</span>
                   <code className="block-nonce">{block.nonce}</code>
                 </div>
+                {block.transactionHash && (
+                  <div className="block-detail-item">
+                    <span className="block-label">Transaction Hash:</span>
+                    <code className="block-hash" style={{ fontSize: '0.75rem', wordBreak: 'break-all' }}>
+                      {block.transactionHash}
+                    </code>
+                    <a 
+                      href={`https://sepolia.etherscan.io/tx/${block.transactionHash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ marginLeft: '8px', color: '#3b82f6', textDecoration: 'underline' }}
+                    >
+                      View on Etherscan
+                    </a>
+                  </div>
+                )}
+                {block.contractAddress && (
+                  <div className="block-detail-item">
+                    <span className="block-label">Contract Address:</span>
+                    <code className="block-hash" style={{ fontSize: '0.75rem', wordBreak: 'break-all' }}>
+                      {block.contractAddress}
+                    </code>
+                    <a 
+                      href={`https://sepolia.etherscan.io/address/${block.contractAddress}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ marginLeft: '8px', color: '#3b82f6', textDecoration: 'underline' }}
+                    >
+                      View on Etherscan
+                    </a>
+                  </div>
+                )}
                 {block.votes.length > 0 && (
                   <div className="block-votes">
                     <span className="block-label">Votes in this block:</span>
