@@ -1499,143 +1499,134 @@ function App() {
 
       setIsMining(true);
 
-      // Use requestAnimationFrame to break up work and prevent UI blocking
+      // Use functional update to get latest blockchain state
       return new Promise((resolve) => {
-        // First frame: prepare the vote
-        requestAnimationFrame(() => {
+        setElections((prev) => {
+          const latestElection = prev.get(currentElectionId!);
+          if (!latestElection) {
+            setIsMining(false);
+            resolve({ success: false, message: "Election not found" });
+            return prev;
+          }
+          
           const newVote: Vote = {
             voterId: "ANONYMOUS", // Don't store actual voter ID for anonymity
             candidate,
             timestamp: Date.now(),
           };
+          
+          const lastBlock = latestElection.blockchain[latestElection.blockchain.length - 1];
+          // Calculate index based on actual blockchain length to avoid duplicates
+          const newBlockIndex = latestElection.blockchain.length;
+          
+          // Check if a block with this index already exists (prevent duplicates)
+          const blockExists = latestElection.blockchain.some(b => b.index === newBlockIndex);
+          if (blockExists) {
+            console.warn(`[VOTE] Block with index ${newBlockIndex} already exists, skipping local block creation`);
+            setIsMining(false);
+            resolve({ success: false, message: "Block already exists" });
+            return prev;
+          }
+          
+          console.log(
+            `Creating new block #${newBlockIndex}. Current blockchain length: ${latestElection.blockchain.length}`
+          );
+          
+          const newBlock: Block = {
+            index: newBlockIndex,
+            timestamp: Date.now(),
+            votes: [newVote],
+            previousHash: lastBlock.hash,
+            hash: "",
+            nonce: 0,
+          };
 
-          // Use functional update to get latest blockchain state
-          setElections((prev) => {
-            const latestElection = prev.get(currentElectionId!);
-            if (!latestElection) {
-              resolve({ success: false, message: "Election not found" });
-              return prev;
-            }
-            
-            const lastBlock = latestElection.blockchain[latestElection.blockchain.length - 1];
-            // Calculate index based on actual blockchain length to avoid duplicates
-            const newBlockIndex = latestElection.blockchain.length;
-            
-            // Check if a block with this index already exists (prevent duplicates)
-            const blockExists = latestElection.blockchain.some(b => b.index === newBlockIndex);
-            if (blockExists) {
-              console.warn(`[VOTE] Block with index ${newBlockIndex} already exists, skipping local block creation`);
-              resolve({ success: false, message: "Block already exists" });
-              return prev;
-            }
-            
-            console.log(
-              `Creating new block #${newBlockIndex}. Current blockchain length: ${latestElection.blockchain.length}`
-            );
-            
-            const newBlock: Block = {
-              index: newBlockIndex,
+          // Mine the block
+          const minedBlock = mineBlock(newBlock);
+
+          const updatedBlockchain = [
+            ...latestElection.blockchain,
+            minedBlock,
+          ];
+          console.log(
+            `Blockchain updated. New length: ${updatedBlockchain.length}, New block index: ${minedBlock.index}`
+          );
+
+          const updatedElection: ElectionData = {
+            ...latestElection,
+            blockchain: updatedBlockchain,
+          };
+
+          // Mark as local update to prevent circular sync
+          isLocalUpdateRef.current = true;
+
+          // Publish block event via Ably so other devices can sync
+          if (currentElectionId) {
+            publishBlockEvent(currentElectionId, minedBlock);
+          }
+
+          const newMap = new Map(prev);
+          newMap.set(currentElectionId!, updatedElection);
+
+          // Reset the flag after the save effect has completed
+          setTimeout(() => {
+            isLocalUpdateRef.current = false;
+          }, 200);
+          
+          // Publish vote event to Ably for real-time updates
+          if (currentElectionId) {
+            const userSessionId = getUserSessionId();
+            publishVoteEvent(currentElectionId, {
+              candidate,
+              voterId: "ANONYMOUS",
+              userSessionId: userSessionId,
               timestamp: Date.now(),
-              votes: [newVote],
-              previousHash: lastBlock.hash,
-              hash: "",
-              nonce: 0,
-            };
+            });
 
-            // Mine the block
-            const minedBlock = mineBlock(newBlock);
+            // Mark this device as having voted (per-device tracking)
+            const deviceVoteKey = `election_${currentElectionId}_device_voted`;
+            localStorage.setItem(deviceVoteKey, 'true');
 
-            const updatedBlockchain = [
-              ...latestElection.blockchain,
-              minedBlock,
-            ];
-            console.log(
-              `Blockchain updated. New length: ${updatedBlockchain.length}, New block index: ${minedBlock.index}`
+            // Calculate and publish stats
+            const updatedVotes = updatedBlockchain.flatMap(
+              (block) => block.votes
+            );
+            const voteCounts = updatedVotes.reduce((acc, vote) => {
+              acc[vote.candidate] = (acc[vote.candidate] || 0) + 1;
+              return acc;
+            }, {} as Record<string, number>);
+
+            const candidates = latestElection.election.candidates.map(
+              (name) => ({
+                name,
+                voteCount: String(voteCounts[name] || 0),
+              })
             );
 
-            const updatedElection: ElectionData = {
-              ...latestElection,
-              blockchain: updatedBlockchain,
-            };
+            publishStatsEvent(currentElectionId, {
+              candidates,
+              totalVoters: String(updatedVotes.length),
+              maxAllowedVoters: "100",
+              remainingVoters: String(
+                Math.max(0, 100 - updatedVotes.length)
+              ),
+              isActive: latestElection.election.status === "active",
+              timeRemaining: String(
+                Math.max(0, latestElection.election.endTime - Date.now())
+              ),
+            });
+          }
 
-            // Mark as local update to prevent circular sync
-            isLocalUpdateRef.current = true;
-
-            // Publish block event via Ably so other devices can sync
-            if (currentElectionId) {
-              publishBlockEvent(currentElectionId, minedBlock);
-            }
-
-            const newMap = new Map(prev);
-            newMap.set(currentElectionId!, updatedElection);
-
-            // Reset the flag after the save effect has completed
-            setTimeout(() => {
-              isLocalUpdateRef.current = false;
-            }, 200);
-            
+          // Set mining to false and resolve after a small delay
+          setTimeout(() => {
+            setIsMining(false);
             resolve({
               success: true,
               message: `Vote for ${candidate} recorded successfully!`,
             });
-            
-            return newMap;
-          });
-
-              // Publish vote event to Ably for real-time updates
-              if (currentElectionId) {
-                const userSessionId = getUserSessionId();
-                publishVoteEvent(currentElectionId, {
-                  candidate,
-                  voterId: "ANONYMOUS",
-                  userSessionId: userSessionId,
-                  timestamp: Date.now(),
-                });
-
-                // Mark this device as having voted (per-device tracking)
-                const deviceVoteKey = `election_${currentElectionId}_device_voted`;
-                localStorage.setItem(deviceVoteKey, 'true');
-
-                // Calculate and publish stats
-                const updatedVotes = updatedBlockchain.flatMap(
-                  (block) => block.votes
-                );
-                const voteCounts = updatedVotes.reduce((acc, vote) => {
-                  acc[vote.candidate] = (acc[vote.candidate] || 0) + 1;
-                  return acc;
-                }, {} as Record<string, number>);
-
-                const candidates = currentElection.election.candidates.map(
-                  (name) => ({
-                    name,
-                    voteCount: String(voteCounts[name] || 0),
-                  })
-                );
-
-                publishStatsEvent(currentElectionId, {
-                  candidates,
-                  totalVoters: String(updatedVotes.length),
-                  maxAllowedVoters: "100",
-                  remainingVoters: String(
-                    Math.max(0, 100 - updatedVotes.length)
-                  ),
-                  isActive: currentElection.election.status === "active",
-                  timeRemaining: String(
-                    Math.max(0, currentElection.election.endTime - Date.now())
-                  ),
-                });
-              }
-
-              // Set mining to false after a small delay to show completion
-              setTimeout(() => {
-                setIsMining(false);
-                resolve({
-                  success: true,
-                  message: `Vote for ${candidate} recorded successfully on the blockchain!`,
-                });
-              }, 100);
-            });
-          });
+          }, 100);
+          
+          return newMap;
         });
       });
     }
