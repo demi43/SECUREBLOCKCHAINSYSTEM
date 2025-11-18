@@ -970,6 +970,7 @@ function App() {
           // Received election data - store it and join
           clearTimeout(timeoutId);
           console.log("[ABLY] Received election data, storing and joining...");
+          console.log("[ABLY] Received election data includes creatorId:", dataEvent.election.creatorId);
           
           // Create genesis block for the election
           const genesisBlock: Block = {
@@ -985,11 +986,17 @@ function App() {
           genesisBlock.hash = calculateHash(genesisBlock);
           
           // Create ElectionData from received data
+          // Ensure creatorId is preserved from the received data
           const newElectionData: ElectionData = {
-            election: dataEvent.election,
+            election: {
+              ...dataEvent.election,
+              creatorId: dataEvent.election.creatorId, // Explicitly preserve creatorId
+            },
             blockchain: [genesisBlock],
             contractAddress: dataEvent.contractAddress,
           };
+          
+          console.log("[ABLY] Storing election with creatorId:", newElectionData.election.creatorId);
           
           // Store election in state and localStorage
           setElections((prev) => {
@@ -1070,11 +1077,26 @@ function App() {
   async function handleEndElection() {
     if (!currentElection || !currentElectionId) return;
 
-    // Check if user is the creator
+    // Check if user is the creator - must check both that creatorId exists and matches
     const currentUserId = getUserSessionId();
     const creatorId = currentElection.election.creatorId;
-    if (creatorId !== currentUserId) {
+    
+    // Log for debugging
+    console.log('[END ELECTION] Creator check:', { 
+      creatorId, 
+      currentUserId, 
+      match: creatorId === currentUserId,
+      creatorIdExists: creatorId !== undefined 
+    });
+    
+    // Only allow if creatorId exists AND matches current user
+    if (!creatorId || creatorId !== currentUserId) {
       toast.error("Only the election creator can end the election!");
+      console.warn('[END ELECTION] Unauthorized attempt to end election:', {
+        creatorId,
+        currentUserId,
+        electionId: currentElectionId
+      });
       return;
     }
 
@@ -1894,8 +1916,14 @@ function App() {
             const currentUserId = getUserSessionId();
             const creatorId = currentElection.election.creatorId;
             // Only show if creatorId exists and matches current user
-            const isCreator = creatorId !== undefined && creatorId === currentUserId;
-            console.log('[ADMIN] Creator check:', { creatorId, currentUserId, isCreator });
+            const isCreator = creatorId !== undefined && creatorId !== null && creatorId === currentUserId;
+            console.log('[ADMIN] Creator check for End Election button:', { 
+              creatorId, 
+              currentUserId, 
+              isCreator,
+              creatorIdType: typeof creatorId,
+              currentUserIdType: typeof currentUserId
+            });
             return isCreator;
           })() && currentElection.election.status === "active" &&
             Date.now() <= currentElection.election.endTime && (
