@@ -29,14 +29,9 @@ import {
   AlertDialogTrigger,
 } from './ui/alert-dialog';
 // Import icons for visual elements
-import { Plus, Users, Clock, Calendar, Shield, CheckCircle2, XCircle, Trash2, Copy, Check } from 'lucide-react';
+import { Plus, Users, Clock, Calendar, Shield, CheckCircle2, XCircle, Trash2 } from 'lucide-react';
 // Import toast notifications for user feedback
 import { toast } from 'sonner';
-// Import Ably functions for session sync
-import { 
-  getUserSessionId, 
-  setUserSessionId
-} from '../ably';
 
 /**
  * Election interface
@@ -94,10 +89,6 @@ export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, e
   const [joinElectionId, setJoinElectionId] = useState('');
   // State controlling visibility of the create election dialog
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  // State for session sync UI
-  const [showSessionSync, setShowSessionSync] = useState(false);
-  const [sessionIdInput, setSessionIdInput] = useState('');
-  const [sessionIdCopied, setSessionIdCopied] = useState(false);
   // State for the new election form data
   const [newElection, setNewElection] = useState({
     title: '',           // Election title
@@ -215,103 +206,6 @@ export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, e
           <p className="hero-description">
             Every vote is immutably recorded on the blockchain, ensuring complete transparency and preventing fraud
           </p>
-          
-          {/* Session Sync Card - For cross-device voting */}
-          <Card className="mt-6 max-w-2xl mx-auto border-purple-500/30 bg-slate-900/50">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <Shield className="w-5 h-5 text-purple-400" />
-                  <div className="text-left">
-                    <p className="text-sm font-semibold text-gray-300">Cross-Device Sync</p>
-                    <p className="text-xs text-gray-500">Sync your session to vote from multiple devices</p>
-                  </div>
-                </div>
-                <Button
-                  onClick={() => setShowSessionSync(!showSessionSync)}
-                  variant="outline"
-                  size="sm"
-                  className="border-purple-500/30 hover:bg-purple-500/10"
-                >
-                  {showSessionSync ? 'Hide' : 'Show'}
-                </Button>
-              </div>
-              
-              {showSessionSync && (
-                <div className="mt-4 pt-4 border-t border-slate-700/50 space-y-3">
-                  <div className="bg-slate-800/30 p-3 rounded-lg border border-purple-500/20">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Shield className="w-4 h-4 text-green-400" />
-                      <Label className="text-sm font-semibold text-gray-300">How Cross-Device Voting Works</Label>
-                    </div>
-                    <p className="text-xs text-gray-400 mb-3">
-                      When you create an election, your session ID is automatically shared via the Election ID.
-                      When someone joins an election using the Election ID, their session automatically syncs.
-                      This allows you to vote from multiple devices!
-                    </p>
-                    
-                    {/* Display current session ID */}
-                    <div>
-                      <Label className="text-xs text-gray-400 mb-2 block">Your Session ID (for reference):</Label>
-                      <div className="flex items-center gap-2">
-                        <Input
-                          value={getUserSessionId()}
-                          readOnly
-                          className="font-mono text-xs bg-slate-800/50"
-                        />
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {
-                            navigator.clipboard.writeText(getUserSessionId());
-                            setSessionIdCopied(true);
-                            toast.success('Session ID copied to clipboard!');
-                            setTimeout(() => setSessionIdCopied(false), 2000);
-                          }}
-                          className="border-purple-500/30"
-                        >
-                          {sessionIdCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                        </Button>
-                      </div>
-                    </div>
-                    
-                    {/* Manual Session Sync (Fallback) */}
-                    <div className="pt-3 border-t border-slate-700/50 mt-3">
-                      <Label className="text-xs text-gray-400 mb-2 block">Manual Session Sync (Fallback):</Label>
-                      <div className="flex items-center gap-2">
-                        <Input
-                          value={sessionIdInput}
-                          onChange={(e) => setSessionIdInput(e.target.value)}
-                          placeholder="Paste session ID here..."
-                          className="font-mono text-xs bg-slate-800/50"
-                        />
-                        <Button
-                          size="sm"
-                          onClick={() => {
-                            if (sessionIdInput.trim()) {
-                              setUserSessionId(sessionIdInput.trim());
-                              setSessionIdInput('');
-                              toast.success('Session ID synced! Refreshing page...');
-                              // Reload to apply changes
-                              setTimeout(() => window.location.reload(), 1000);
-                            } else {
-                              toast.error('Please enter a session ID');
-                            }
-                          }}
-                          className="bg-purple-600 hover:bg-purple-500"
-                        >
-                          Sync
-                        </Button>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-1">
-                        Only use this if automatic sync via Election ID doesn't work
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
         </div>
 
         {/* Grid layout for Create and Join election cards */}
