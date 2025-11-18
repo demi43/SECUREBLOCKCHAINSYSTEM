@@ -275,6 +275,7 @@ function saveElectionsToStorage(elections: Map<string, ElectionData>) {
             createdAt: data.election.createdAt,
             status: data.election.status,
             contractAddress: contractAddress,
+            creatorId: data.election.creatorId, // Include creatorId for admin controls
           },
           // Don't save blockchain for contracts - they're on blockchain
           blockchain: null, // Will be loaded from backend
@@ -391,6 +392,33 @@ function App() {
   // Use a ref to track if we're making a local update (to prevent circular updates)
   // This prevents infinite loops when we update elections and trigger storage events
   const isLocalUpdateRef = useRef(false);
+  
+  // Ref to store interval IDs for election data publishing (to clean up on unmount)
+  const electionDataIntervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  
+  // Refs to store current values for Ably subscriptions (to avoid stale closures)
+  const currentElectionRef = useRef<ElectionData | null>(null);
+  const backendConnectedRef = useRef(false);
+  
+  // Refs to track block and election-ended subscriptions (for cleanup)
+  const blockUnsubscribeRef = useRef<(() => void) | null>(null);
+  const electionEndedUnsubscribeRef = useRef<(() => void) | null>(null);
+  const isSubscribedRef = useRef(false);
+  
+  // Calculate currentElection - get the election data for the currently selected election
+  // This is computed from currentElectionId and the elections Map
+  const currentElection = currentElectionId
+    ? elections.get(currentElectionId)
+    : null;
+
+  // Update refs when values change
+  useEffect(() => {
+    currentElectionRef.current = currentElection ?? null;
+  }, [currentElection]);
+  
+  useEffect(() => {
+    backendConnectedRef.current = backendConnected;
+  }, [backendConnected]);
 
   // Reload elections when storage changes (from other tabs)
   // This effect runs when syncKey changes (triggered by storage events from other tabs)
@@ -414,12 +442,6 @@ function App() {
     // Only trigger custom event for cross-tab sync (not for local updates)
     // The storage event will handle cross-tab updates automatically
   }, [elections]);
-
-  // Calculate currentElection - get the election data for the currently selected election
-  // This is computed from currentElectionId and the elections Map
-  const currentElection = currentElectionId
-    ? elections.get(currentElectionId)
-    : null;
 
   /**
    * Check backend connection and fetch smart contract data
@@ -547,6 +569,7 @@ function App() {
     const unsubscribe = subscribeToElectionUpdates(
       currentElectionId,
       // onVote callback - when any user casts a vote
+      // Use refs to avoid stale closures
       (voteData) => {
         console.log("[ABLY] Vote received from another client:", voteData);
 
@@ -555,10 +578,12 @@ function App() {
 
         toast.success(`New vote cast for ${voteData.candidate}!`);
 
-        // Refresh contract data if available
+        // Refresh contract data if available - use refs to get current values
+        const currentElection = currentElectionRef.current;
+        const backendConnected = backendConnectedRef.current;
         const electionContractAddress =
-          currentElection.contractAddress ||
-          currentElection.election.contractAddress;
+          currentElection?.contractAddress ||
+          currentElection?.election.contractAddress;
         if (electionContractAddress && backendConnected) {
           Promise.all([
             api.getCandidates(electionContractAddress).catch(() => []),
@@ -591,98 +616,139 @@ function App() {
     );
 
     // Subscribe to block events and election ended events to sync across devices
-    let blockUnsubscribe: (() => void) | null = null;
-    let electionEndedUnsubscribe: (() => void) | null = null;
-    if (currentElectionId) {
+    // Use refs to track unsubscribe functions and handle async import
+    if (currentElectionId && !isSubscribedRef.current) {
+      isSubscribedRef.current = true;
       // Import ablyClient dynamically to access it
-      import('./ably').then((ablyModule) => {
-        const ablyClient = (ablyModule as any).ablyClient;
-        if (ablyClient) {
-          const electionChannel = ablyClient.channels.get(`election:${currentElectionId}`);
-          
-          // Subscribe to block events
-          electionChannel.subscribe('block', (message: any) => {
-            console.log("[ABLY] Block event received:", message.data);
-            const blockEvent = message.data as BlockEvent;
+      import('./ably')
+        .then((ablyModule) => {
+          const ablyClient = (ablyModule as any).ablyClient;
+          if (ablyClient && currentElectionId) {
+            const electionChannel = ablyClient.channels.get(`election:${currentElectionId}`);
             
-            // Only process if it's for the current election
-            if (blockEvent.electionId === currentElectionId && currentElection) {
-              // Check if this block already exists (prevent duplicates)
-              const blockExists = currentElection.blockchain.some(
-                b => b.index === blockEvent.block.index && b.hash === blockEvent.block.hash
-              );
+            // Subscribe to block events - use refs to avoid stale closures
+            electionChannel.subscribe('block', (message: any) => {
+              console.log("[ABLY] Block event received:", message.data);
+              const blockEvent = message.data as BlockEvent;
               
-              if (!blockExists) {
-                // Add the new block to the blockchain
-                const updatedBlockchain = [...currentElection.blockchain, blockEvent.block];
+              // Get current values from refs to avoid stale closures
+              const currentElection = currentElectionRef.current;
+              const currentElectionIdValue = currentElectionId;
+              
+              // Only process if it's for the current election
+              if (blockEvent.electionId === currentElectionIdValue && currentElection) {
+                // Check if this block already exists (prevent duplicates)
+                const blockExists = currentElection.blockchain.some(
+                  b => b.index === blockEvent.block.index && b.hash === blockEvent.block.hash
+                );
+                
+                if (!blockExists) {
+                  // Add the new block to the blockchain
+                  const updatedBlockchain = [...currentElection.blockchain, blockEvent.block];
+                  const updatedElection: ElectionData = {
+                    ...currentElection,
+                    blockchain: updatedBlockchain,
+                  };
+                  
+                  // Update elections state
+                  setElections((prev) => {
+                    const newMap = new Map(prev);
+                    newMap.set(currentElectionIdValue, updatedElection);
+                    return newMap;
+                  });
+                  
+                  console.log("[ABLY] Block added to blockchain:", blockEvent.block.index);
+                }
+              }
+            });
+            
+            // Subscribe to election ended events - use refs to avoid stale closures
+            electionChannel.subscribe('election-ended', (message: any) => {
+              console.log("[ABLY] Election ended event received:", message.data);
+              const endedEvent = message.data as { electionId: string; endedBy: string; timestamp: number; transactionHash?: string };
+              
+              // Get current values from refs to avoid stale closures
+              const currentElection = currentElectionRef.current;
+              const currentElectionIdValue = currentElectionId;
+              
+              // Only process if it's for the current election
+              if (endedEvent.electionId === currentElectionIdValue && currentElection) {
+                // Update election status to closed
                 const updatedElection: ElectionData = {
                   ...currentElection,
-                  blockchain: updatedBlockchain,
+                  election: {
+                    ...currentElection.election,
+                    status: "closed",
+                  },
                 };
                 
                 // Update elections state
                 setElections((prev) => {
                   const newMap = new Map(prev);
-                  newMap.set(currentElectionId, updatedElection);
+                  newMap.set(currentElectionIdValue, updatedElection);
                   return newMap;
                 });
                 
-                console.log("[ABLY] Block added to blockchain:", blockEvent.block.index);
+                toast.success("Election has been ended by the creator!");
+                console.log("[ABLY] Election status updated to closed");
               }
-            }
-          });
-          
-          // Subscribe to election ended events
-          electionChannel.subscribe('election-ended', (message: any) => {
-            console.log("[ABLY] Election ended event received:", message.data);
-            const endedEvent = message.data as { electionId: string; endedBy: string; timestamp: number; transactionHash?: string };
+            });
             
-            // Only process if it's for the current election
-            if (endedEvent.electionId === currentElectionId && currentElection) {
-              // Update election status to closed
-              const updatedElection: ElectionData = {
-                ...currentElection,
-                election: {
-                  ...currentElection.election,
-                  status: "closed",
-                },
-              };
-              
-              // Update elections state
-              setElections((prev) => {
-                const newMap = new Map(prev);
-                newMap.set(currentElectionId, updatedElection);
-                return newMap;
-              });
-              
-              toast.success("Election has been ended by the creator!");
-              console.log("[ABLY] Election status updated to closed");
-            }
-          });
-          
-          // Store unsubscribe functions
-          blockUnsubscribe = () => {
-            electionChannel.unsubscribe('block');
-          };
-          electionEndedUnsubscribe = () => {
-            electionChannel.unsubscribe('election-ended');
-          };
-        }
-      });
+            // Store unsubscribe functions in refs
+            blockUnsubscribeRef.current = () => {
+              electionChannel.unsubscribe('block');
+            };
+            electionEndedUnsubscribeRef.current = () => {
+              electionChannel.unsubscribe('election-ended');
+            };
+          }
+        })
+        .catch((err) => {
+          console.error('[ABLY] Failed to import ably module:', err);
+          isSubscribedRef.current = false;
+        });
     }
 
     return () => {
       unsubscribe();
-      if (blockUnsubscribe) {
-        blockUnsubscribe();
+      // Clean up block and election-ended subscriptions
+      if (blockUnsubscribeRef.current) {
+        blockUnsubscribeRef.current();
+        blockUnsubscribeRef.current = null;
       }
-      if (electionEndedUnsubscribe) {
-        electionEndedUnsubscribe();
+      if (electionEndedUnsubscribeRef.current) {
+        electionEndedUnsubscribeRef.current();
+        electionEndedUnsubscribeRef.current = null;
       }
+      isSubscribedRef.current = false;
       leavePresence();
     };
   }, [currentElectionId, currentElection, backendConnected]);
-
+  
+  // Cleanup: Clear all election data publishing intervals on unmount
+  useEffect(() => {
+    return () => {
+      // Clear all intervals when component unmounts
+      electionDataIntervalsRef.current.forEach((interval, electionId) => {
+        clearInterval(interval);
+        console.log(`[CLEANUP] Cleared election data publishing interval for: ${electionId}`);
+      });
+      electionDataIntervalsRef.current.clear();
+    };
+  }, []);
+  
+  // Cleanup: Clear election data publishing interval when election ends or is deleted
+  useEffect(() => {
+    if (currentElection?.election.status === 'closed') {
+      const interval = electionDataIntervalsRef.current.get(currentElectionId || '');
+      if (interval) {
+        clearInterval(interval);
+        electionDataIntervalsRef.current.delete(currentElectionId || '');
+        console.log(`[CLEANUP] Cleared election data publishing interval for closed election: ${currentElectionId}`);
+      }
+    }
+  }, [currentElection?.election.status, currentElectionId]);
+  
   function createGenesisBlock(): Block {
     const genesisBlock = {
       index: 0,
@@ -837,8 +903,8 @@ function App() {
             });
           }, 10000);
           
-          // Store interval ID to clear when election ends or component unmounts
-          (window as any)[`__electionData_${id}`] = interval;
+          // Store interval ID in ref to clean up on unmount or election end
+          electionDataIntervalsRef.current.set(id, interval);
         })
         .catch((err) => {
           console.warn('[ABLY] Failed to publish election data:', err);
@@ -1045,6 +1111,14 @@ function App() {
       },
     };
     setElections(new Map(elections).set(currentElectionId, updatedElection));
+
+    // Clear election data publishing interval when election ends
+    const interval = electionDataIntervalsRef.current.get(currentElectionId);
+    if (interval) {
+      clearInterval(interval);
+      electionDataIntervalsRef.current.delete(currentElectionId);
+      console.log(`[CLEANUP] Cleared election data publishing interval for ended election: ${currentElectionId}`);
+    }
 
     // Reset the flag after the save effect has completed
     setTimeout(() => {
