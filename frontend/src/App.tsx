@@ -1759,44 +1759,6 @@ function App() {
               status={currentElection.election.status}
             />
           </div>
-          {currentElection.election.status === "active" &&
-            Date.now() <= currentElection.election.endTime && (
-              <div className="mt-4">
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button
-                      variant="danger"
-                      className="bg-red-600 hover:bg-red-500"
-                    >
-                      End Election Now
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent className="bg-slate-900 border-slate-700">
-                    <AlertDialogHeader>
-                      <AlertDialogTitle className="text-gray-100">
-                        End Election?
-                      </AlertDialogTitle>
-                      <AlertDialogDescription className="text-gray-400">
-                        This will immediately close the election and prevent any
-                        further votes from being cast. This action cannot be
-                        undone.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel className="bg-slate-800 border-slate-700 text-gray-300 hover:bg-slate-700">
-                        Cancel
-                      </AlertDialogCancel>
-                      <AlertDialogAction
-                        onClick={handleEndElection}
-                        className="bg-red-600 hover:bg-red-500"
-                      >
-                        End Election
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              </div>
-            )}
         </div>
 
         <Tabs
