@@ -39,6 +39,9 @@ import {
   generateSyncCode,
   publishElectionData,
   subscribeToElectionData,
+  generateCreatorToken,
+  getCreatorToken,
+  setCreatorToken,
   type ElectionDataEvent,
   type BlockEvent,
 } from "./ably";
@@ -401,8 +404,21 @@ function App() {
       return;
     }
 
-    // Check creator status from backend
-    api.checkCreator(currentElectionId)
+    // Get creator token from localStorage
+    const creatorToken = getCreatorToken(currentElectionId);
+    if (!creatorToken) {
+      // No token means not creator
+      setCreatorStatus((prev) => {
+        const newMap = new Map(prev);
+        newMap.set(currentElectionId, false);
+        return newMap;
+      });
+      console.log(`[CREATOR] No creator token found for ${currentElectionId} - not creator`);
+      return;
+    }
+
+    // Check creator status from backend with token
+    api.checkCreator(currentElectionId, creatorToken)
       .then((status) => {
         setCreatorStatus((prev) => {
           const newMap = new Map(prev);
@@ -413,7 +429,12 @@ function App() {
       })
       .catch((error) => {
         console.warn(`[CREATOR] Failed to check creator status for ${currentElectionId}:`, error);
-        // Don't update status on error - keep existing or fallback to local check
+        // On error, assume not creator for security
+        setCreatorStatus((prev) => {
+          const newMap = new Map(prev);
+          newMap.set(currentElectionId, false);
+          return newMap;
+        });
       });
   }, [currentElectionId, backendConnected]);
   
@@ -471,12 +492,14 @@ function App() {
    * Check backend connection and fetch smart contract data
    *
    * This effect runs when the current election changes.
-   * It checks if the election has a contract address and if so:
-   * 1. Checks backend health
-   * 2. Fetches candidate vote counts from the contract
-   * 3. Fetches election statistics from the contract
+   * It ALWAYS checks backend health (for creator verification).
+   * If the election has a contract address, it also:
+   * 1. Fetches candidate vote counts from the contract
+   * 2. Fetches election statistics from the contract
    *
-   * This ensures the UI always shows accurate blockchain data for contract elections.
+   * This ensures:
+   * - Backend is always checked for creator verification (even for local elections)
+   * - UI always shows accurate blockchain data for contract elections
    */
   useEffect(() => {
     // If no election is selected, reset backend connection state
@@ -491,21 +514,13 @@ function App() {
       currentElection.contractAddress ||
       currentElection.election.contractAddress;
 
-    // If no contract, this is a local-only election
-    if (!electionContractAddress) {
-      // No contract deployed for this election - use local blockchain
-      setBackendConnected(false);
-      setSmartContractData(null);
-      return;
-    }
-
     // Check backend health asynchronously (don't block render)
     // Use cancelled flag to prevent state updates if component unmounts
     let cancelled = false;
 
     // Use setTimeout to ensure this doesn't block initial render
     const timeoutId = setTimeout(() => {
-      // Check if backend is available
+      // ALWAYS check if backend is available (needed for creator verification)
       api
         .health()
         .then(() => {
@@ -513,26 +528,33 @@ function App() {
           if (cancelled) return;
           // Backend is connected
           setBackendConnected(true);
-          // Fetch candidates and stats from smart contract using election-specific address
-          // Use Promise.all to fetch both in parallel
-          Promise.all([
-            api.getCandidates(electionContractAddress).catch(() => []),
-            api.getStats(electionContractAddress).catch(() => null),
-          ])
-            .then(([candidates, stats]) => {
-              // If component unmounted, don't update state
-              if (!cancelled) {
-                // Update state with fetched contract data
-                setSmartContractData({ candidates, stats });
-              }
-            })
-            .catch((error) => {
-              // If component unmounted, don't update state
-              if (!cancelled) {
-                console.error("Error fetching smart contract data:", error);
-                setSmartContractData(null);
-              }
-            });
+          
+          // Only fetch contract data if this election has a contract
+          if (electionContractAddress) {
+            // Fetch candidates and stats from smart contract using election-specific address
+            // Use Promise.all to fetch both in parallel
+            Promise.all([
+              api.getCandidates(electionContractAddress).catch(() => []),
+              api.getStats(electionContractAddress).catch(() => null),
+            ])
+              .then(([candidates, stats]) => {
+                // If component unmounted, don't update state
+                if (!cancelled) {
+                  // Update state with fetched contract data
+                  setSmartContractData({ candidates, stats });
+                }
+              })
+              .catch((error) => {
+                // If component unmounted, don't update state
+                if (!cancelled) {
+                  console.error("Error fetching smart contract data:", error);
+                  setSmartContractData(null);
+                }
+              });
+          } else {
+            // No contract - clear contract data but keep backendConnected true for creator verification
+            setSmartContractData(null);
+          }
         })
         .catch((error) => {
           // If component unmounted, don't update state
@@ -650,71 +672,89 @@ function App() {
           if (ablyClient && currentElectionId) {
             const electionChannel = ablyClient.channels.get(`election:${currentElectionId}`);
             
-            // Subscribe to block events - use refs to avoid stale closures
+            // Subscribe to block events - use functional updates to get latest state
             electionChannel.subscribe('block', (message: any) => {
               console.log("[ABLY] Block event received:", message.data);
               const blockEvent = message.data as BlockEvent;
               
-              // Get current values from refs to avoid stale closures
-              const currentElection = currentElectionRef.current;
+              // Get current election ID from closure (will be updated when effect re-runs)
               const currentElectionIdValue = currentElectionId;
               
               // Only process if it's for the current election
-              if (blockEvent.electionId === currentElectionIdValue && currentElection) {
-                // Check if this block already exists (prevent duplicates)
-                const blockExists = currentElection.blockchain.some(
-                  b => b.index === blockEvent.block.index && b.hash === blockEvent.block.hash
-                );
-                
-                if (!blockExists) {
-                  // Add the new block to the blockchain
+              if (blockEvent.electionId === currentElectionIdValue) {
+                // Use functional update to get the latest election state
+                setElections((prev) => {
+                  const currentElection = prev.get(currentElectionIdValue);
+                  
+                  // Only process if election exists and is current
+                  if (!currentElection) {
+                    console.warn("[ABLY] Block received but election not found:", currentElectionIdValue);
+                    return prev;
+                  }
+                  
+                  // Check if this block already exists (prevent duplicates)
+                  const blockExists = currentElection.blockchain.some(
+                    b => b.index === blockEvent.block.index && b.hash === blockEvent.block.hash
+                  );
+                  
+                  if (blockExists) {
+                    console.log("[ABLY] Block already exists, skipping:", blockEvent.block.index);
+                    return prev;
+                  }
+                  
+                  // Add the new block to the blockchain using latest state
                   const updatedBlockchain = [...currentElection.blockchain, blockEvent.block];
                   const updatedElection: ElectionData = {
                     ...currentElection,
                     blockchain: updatedBlockchain,
                   };
                   
-                  // Update elections state
-                  setElections((prev) => {
-                    const newMap = new Map(prev);
-                    newMap.set(currentElectionIdValue, updatedElection);
-                    return newMap;
-                  });
+                  // Create new Map with updated election
+                  const newMap = new Map(prev);
+                  newMap.set(currentElectionIdValue, updatedElection);
                   
-                  console.log("[ABLY] Block added to blockchain:", blockEvent.block.index);
-                }
+                  console.log("[ABLY] Block added to blockchain:", blockEvent.block.index, "Total blocks:", updatedBlockchain.length);
+                  return newMap;
+                });
               }
             });
             
-            // Subscribe to election ended events - use refs to avoid stale closures
+            // Subscribe to election ended events - use functional updates to get latest state
             electionChannel.subscribe('election-ended', (message: any) => {
               console.log("[ABLY] Election ended event received:", message.data);
               const endedEvent = message.data as { electionId: string; endedBy: string; timestamp: number; transactionHash?: string };
               
-              // Get current values from refs to avoid stale closures
-              const currentElection = currentElectionRef.current;
+              // Get current election ID from closure (will be updated when effect re-runs)
               const currentElectionIdValue = currentElectionId;
               
               // Only process if it's for the current election
-              if (endedEvent.electionId === currentElectionIdValue && currentElection) {
-                // Update election status to closed
-                const updatedElection: ElectionData = {
-                  ...currentElection,
-                  election: {
-                    ...currentElection.election,
-                    status: "closed",
-                  },
-                };
-                
-                // Update elections state
+              if (endedEvent.electionId === currentElectionIdValue) {
+                // Use functional update to get the latest election state
                 setElections((prev) => {
+                  const currentElection = prev.get(currentElectionIdValue);
+                  
+                  // Only process if election exists and is current
+                  if (!currentElection) {
+                    console.warn("[ABLY] Election ended event received but election not found:", currentElectionIdValue);
+                    return prev;
+                  }
+                  
+                  const updatedElection: ElectionData = {
+                    ...currentElection,
+                    election: {
+                      ...currentElection.election,
+                      status: "closed",
+                    },
+                  };
+                  
+                  // Create new Map with updated election
                   const newMap = new Map(prev);
                   newMap.set(currentElectionIdValue, updatedElection);
+                  
+                  toast.success("Election has been ended by the creator!");
+                  console.log("[ABLY] Election status updated to closed");
                   return newMap;
                 });
-                
-                toast.success("Election has been ended by the creator!");
-                console.log("[ABLY] Election status updated to closed");
               }
             });
             
@@ -831,6 +871,13 @@ function App() {
       let contractAddress: string | undefined = undefined;
       let deployResult: { contractAddress: string; transactionHash: string } | undefined = undefined;
 
+      // Generate creator token for this election (session-based verification)
+      const creatorToken = generateCreatorToken();
+      console.log(`[CREATE] Generated creator token for election ${id}`);
+      
+      // Store creator token in localStorage
+      setCreatorToken(id, creatorToken);
+
       // Try to deploy contract if backend is available
       try {
         console.log("Attempting to deploy contract to blockchain...");
@@ -838,7 +885,8 @@ function App() {
           electionData.candidates,
           100, // maxVoters
           durationHours,
-          id // Pass election ID for creator tracking
+          id, // Pass election ID for creator tracking
+          creatorToken // Pass creator token for verification
         );
         contractAddress = deployResult.contractAddress;
         console.log("Contract deployed successfully:", contractAddress);
@@ -853,13 +901,13 @@ function App() {
       }
 
       // Register creator with backend (even for local elections)
-      // This ensures IP-based verification works for all elections
+      // This ensures token-based verification works for all elections
       if (backendConnected) {
         try {
-          await api.registerElectionCreator(id);
-          console.log(`[CREATE] Registered creator IP for election ${id}`);
+          await api.registerElectionCreator(id, creatorToken);
+          console.log(`[CREATE] Registered creator token for election ${id}`);
         } catch (error) {
-          console.warn(`[CREATE] Failed to register creator IP for election ${id}:`, error);
+          console.warn(`[CREATE] Failed to register creator token for election ${id}:`, error);
           // Continue anyway - election will still be created
         }
       }
@@ -1114,10 +1162,18 @@ function App() {
   async function handleEndElection() {
     if (!currentElection || !currentElectionId) return;
 
-    // Verify creator with backend (IP-based verification)
+    // Get creator token from localStorage
+    const creatorToken = getCreatorToken(currentElectionId);
+    if (!creatorToken) {
+      toast.error("Only the election creator can end the election!");
+      console.warn('[END ELECTION] No creator token found - not creator');
+      return;
+    }
+
+    // Verify creator with backend (token-based verification)
     if (backendConnected) {
       try {
-        const creatorStatus = await api.checkCreator(currentElectionId);
+        const creatorStatus = await api.checkCreator(currentElectionId, creatorToken);
         if (!creatorStatus.isCreator) {
           toast.error("Only the election creator can end the election!");
           console.warn('[END ELECTION] Backend verification failed: not creator');
@@ -1126,25 +1182,14 @@ function App() {
         console.log('[END ELECTION] Backend verified creator status');
       } catch (error) {
         console.error('[END ELECTION] Failed to verify creator with backend:', error);
-        // Fallback to local check if backend check fails
-        const currentUserId = getUserSessionId();
-        const creatorId = currentElection.election.creatorId;
-        if (!creatorId || creatorId !== currentUserId) {
-          toast.error("Only the election creator can end the election!");
-          return;
-        }
-        console.log('[END ELECTION] Using fallback local creator check');
-      }
-    } else {
-      // Fallback to local check if backend not connected
-      const currentUserId = getUserSessionId();
-      const creatorId = currentElection.election.creatorId;
-      if (!creatorId || creatorId !== currentUserId) {
         toast.error("Only the election creator can end the election!");
-        console.warn('[END ELECTION] Unauthorized attempt (backend not connected, local check failed)');
         return;
       }
-      console.log('[END ELECTION] Backend not connected, using local creator check');
+    } else {
+      // If backend not connected, we can't verify - don't allow ending
+      toast.error("Backend not available. Cannot verify creator.");
+      console.warn('[END ELECTION] Backend not connected - cannot verify creator');
+      return;
     }
 
     // Try to end election on blockchain if contract exists
@@ -1155,11 +1200,12 @@ function App() {
 
     if (backendConnected && electionContractAddress) {
       try {
-        // Call backend API to end election on blockchain (backend will verify IP again)
+        // Call backend API to end election on blockchain (backend will verify token)
         const result = await api.endElection(
           electionContractAddress, // adminAddress (not used but required)
           electionContractAddress,
-          currentElectionId // Pass election ID for IP verification
+          currentElectionId, // Pass election ID for token verification
+          creatorToken // Pass creator token for verification
         );
         transactionHash = result.transactionHash;
         console.log("[END] Election ended on blockchain:", transactionHash);
@@ -1948,9 +1994,15 @@ function App() {
             </TabsTrigger>
             {/* Only show Blockchain tab to election creator */}
             {(() => {
-              // Use backend creator status if available, fallback to local check
+              // Use backend creator status if available (IP-based verification)
               const backendIsCreator = creatorStatus.get(currentElectionId || '');
-              if (backendConnected && backendIsCreator !== undefined) {
+              
+              // If backend is connected, ONLY use backend verification (don't fallback to local)
+              if (backendConnected) {
+                // If backend check hasn't completed yet, don't show tab (default to false)
+                if (backendIsCreator === undefined) {
+                  return null; // Don't show tab until backend confirms creator status
+                }
                 // Use backend verification (IP-based)
                 return backendIsCreator ? (
                   <TabsTrigger
@@ -1962,7 +2014,8 @@ function App() {
                   </TabsTrigger>
                 ) : null;
               }
-              // Fallback to local check if backend not available or not checked yet
+              
+              // Only fallback to local check if backend is truly unavailable
               const currentUserId = getUserSessionId();
               const creatorId = currentElection.election.creatorId;
               const isCreator = creatorId !== undefined && creatorId === currentUserId;
@@ -1980,9 +2033,16 @@ function App() {
 
           {/* Check if current user is the creator of this election */}
           {(() => {
-            // Use backend creator status if available, fallback to local check
+            // Use backend creator status if available (IP-based verification)
             const backendIsCreator = creatorStatus.get(currentElectionId || '');
-            if (backendConnected && backendIsCreator !== undefined) {
+            
+            // If backend is connected, ONLY use backend verification (don't fallback to local)
+            if (backendConnected) {
+              // If backend check hasn't completed yet, don't show button (default to false)
+              if (backendIsCreator === undefined) {
+                console.log('[ADMIN] Creator check pending - waiting for backend response');
+                return false; // Don't show button until backend confirms creator status
+              }
               // Use backend verification (IP-based)
               console.log('[ADMIN] Creator check for End Election button (backend):', { 
                 backendIsCreator,
@@ -1990,11 +2050,14 @@ function App() {
               });
               return backendIsCreator;
             }
-            // Fallback to local check if backend not available or not checked yet
+            
+            // Only fallback to local check if backend is truly unavailable
+            // This should rarely happen if backend is deployed
+            console.warn('[ADMIN] Backend not connected - using fallback local check (not secure across devices)');
             const currentUserId = getUserSessionId();
             const creatorId = currentElection.election.creatorId;
             const isCreator = creatorId !== undefined && creatorId !== null && creatorId === currentUserId;
-            console.log('[ADMIN] Creator check for End Election button (local):', { 
+            console.log('[ADMIN] Creator check for End Election button (local fallback):', { 
               backendIsCreator,
               creatorId, 
               currentUserId, 
@@ -2079,9 +2142,15 @@ function App() {
 
           {/* Only show Blockchain tab content to election creator */}
           {(() => {
-            // Use backend creator status if available, fallback to local check
+            // Use backend creator status if available (IP-based verification)
             const backendIsCreator = creatorStatus.get(currentElectionId || '');
-            if (backendConnected && backendIsCreator !== undefined) {
+            
+            // If backend is connected, ONLY use backend verification (don't fallback to local)
+            if (backendConnected) {
+              // If backend check hasn't completed yet, don't show content (default to false)
+              if (backendIsCreator === undefined) {
+                return null; // Don't show content until backend confirms creator status
+              }
               // Use backend verification (IP-based)
               return backendIsCreator ? (
                 <TabsContent value="blockchain">
@@ -2089,7 +2158,8 @@ function App() {
                 </TabsContent>
               ) : null;
             }
-            // Fallback to local check if backend not available or not checked yet
+            
+            // Only fallback to local check if backend is truly unavailable
             const currentUserId = getUserSessionId();
             const isCreator = currentElection.election.creatorId === currentUserId;
             return isCreator ? (

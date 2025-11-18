@@ -79,7 +79,7 @@ def create_web3() -> Web3:
 
 w3 = create_web3()
 
-# Store election creators: electionId -> creatorIP
+# Store election creators: electionId -> creatorToken
 # In production, use a database instead of in-memory dict
 election_creators: Dict[str, str] = {}
 
@@ -388,7 +388,7 @@ def vote(payload: Dict[str, Any]) -> Dict[str, Any]:
 def deploy_contract(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     """Deploy a new SchoolVoting contract with custom candidates.
     
-    Stores the creator's IP address for later verification when ending elections.
+    Stores the creator's session token for later verification when ending elections.
     """
     _ensure_contract_connection()
     
@@ -396,18 +396,17 @@ def deploy_contract(payload: Dict[str, Any], request: Request) -> Dict[str, Any]
     max_voters = payload.get("maxVoters", 100)
     duration_hours = payload.get("durationHours", 24)
     election_id = payload.get("electionId")  # Election ID from frontend
+    creator_token = payload.get("creatorToken")  # Session token from frontend
     
     if not candidates or len(candidates) < 2:
         raise HTTPException(status_code=400, detail="At least 2 candidates are required")
     
-    # Get creator IP address
-    creator_ip = get_client_ip(request)
-    print(f"[DEPLOY] Creator IP: {creator_ip}, Election ID: {election_id}")
-    
-    # Store creator info if election ID is provided
-    if election_id:
-        election_creators[election_id] = creator_ip
-        print(f"[DEPLOY] Stored creator IP {creator_ip} for election {election_id}")
+    # Store creator token if election ID and token are provided
+    if election_id and creator_token:
+        election_creators[election_id] = creator_token
+        print(f"[DEPLOY] Stored creator token for election {election_id}")
+    elif election_id:
+        print(f"[DEPLOY] Warning: No creator token provided for election {election_id}")
     
     if not SERVER_ACCOUNT:
         raise HTTPException(
@@ -480,11 +479,12 @@ def deploy_contract(payload: Dict[str, Any], request: Request) -> Dict[str, Any]
 
 @app.post("/api/end-election")
 def end_election(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
-    """End an election. Verifies that the requester is the creator (by IP address)."""
+    """End an election. Verifies that the requester is the creator (by session token)."""
     _ensure_contract_connection()
     admin_address = payload.get("adminAddress")  # Not used for signing, but kept for compatibility
     contract_address = payload.get("contractAddress")  # Election-specific contract address
     election_id = payload.get("electionId")  # Election ID from frontend
+    creator_token = payload.get("creatorToken")  # Session token from frontend
     
     if not admin_address:
         raise HTTPException(status_code=400, detail="Missing adminAddress")
@@ -495,24 +495,24 @@ def end_election(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
             detail="Server account not configured. Set SERVER_PRIVATE_KEY in .env"
         )
     
-    # Verify creator by IP address
+    # Verify creator by session token
     if election_id:
-        creator_ip = election_creators.get(election_id)
-        requester_ip = get_client_ip(request)
+        stored_token = election_creators.get(election_id)
         
         print(f"[END] Election ID: {election_id}")
-        print(f"[END] Creator IP: {creator_ip}, Requester IP: {requester_ip}")
+        print(f"[END] Stored token exists: {stored_token is not None}")
+        print(f"[END] Provided token: {creator_token is not None}")
         
-        if creator_ip:
-            if requester_ip != creator_ip:
-                print(f"[END] Unauthorized: IP mismatch")
+        if stored_token:
+            if not creator_token or creator_token != stored_token:
+                print(f"[END] Unauthorized: Token mismatch")
                 raise HTTPException(
                     status_code=403,
                     detail="Only the election creator can end the election"
                 )
-            print(f"[END] Creator verified by IP")
+            print(f"[END] Creator verified by token")
         else:
-            print(f"[END] Warning: No creator IP stored for election {election_id}, allowing request")
+            print(f"[END] Warning: No creator token stored for election {election_id}, allowing request")
     else:
         print(f"[END] Warning: No election ID provided, skipping creator verification")
 
@@ -538,46 +538,50 @@ def end_election(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
 
 @app.post("/api/register-election-creator")
 def register_election_creator(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
-    """Register the creator of an election (for local elections without contracts)."""
+    """Register the creator of an election (for local elections without contracts).
+    
+    Stores the creator's session token for later verification.
+    """
     election_id = payload.get("electionId")
+    creator_token = payload.get("creatorToken")
     
     if not election_id:
         raise HTTPException(status_code=400, detail="Missing electionId")
     
-    # Get creator IP address
-    creator_ip = get_client_ip(request)
-    print(f"[REGISTER] Registering creator IP: {creator_ip} for election: {election_id}")
+    if not creator_token:
+        raise HTTPException(status_code=400, detail="Missing creatorToken")
     
-    # Store creator info
-    election_creators[election_id] = creator_ip
-    print(f"[REGISTER] Stored creator IP {creator_ip} for election {election_id}")
+    # Store creator token
+    election_creators[election_id] = creator_token
+    print(f"[REGISTER] Stored creator token for election {election_id}")
     
     return {
         "success": True,
         "data": {
             "electionId": election_id,
-            "creatorIp": creator_ip,
         }
     }
 
 
 @app.get("/api/check-creator")
-def check_creator(electionId: str, request: Request) -> Dict[str, Any]:
-    """Check if the current requester is the creator of the election."""
-    creator_ip = election_creators.get(electionId)
-    requester_ip = get_client_ip(request)
+def check_creator(electionId: str, creatorToken: str | None = None) -> Dict[str, Any]:
+    """Check if the current requester is the creator of the election.
     
-    is_creator = creator_ip is not None and requester_ip == creator_ip
+    Verifies the provided session token matches the stored creator token.
+    """
+    stored_token = election_creators.get(electionId)
+    
+    # Verify token matches
+    is_creator = stored_token is not None and creatorToken is not None and stored_token == creatorToken
     
     print(f"[CHECK] Election ID: {electionId}")
-    print(f"[CHECK] Creator IP: {creator_ip}, Requester IP: {requester_ip}")
-    print(f"[CHECK] Is creator: {is_creator}")
+    print(f"[CHECK] Stored token exists: {stored_token is not None}")
+    print(f"[CHECK] Provided token matches: {is_creator}")
     
     return {
         "success": True,
         "data": {
             "isCreator": is_creator,
-            "creatorIp": creator_ip if is_creator else None,  # Only return if they are the creator
         }
     }
 

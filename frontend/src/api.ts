@@ -265,11 +265,12 @@ export const api = {
    * @param adminAddress - The admin address (for authorization check)
    * @param contractAddress - Optional contract address for election-specific ending
    * @param electionId - The election ID for creator verification
+   * @param creatorToken - The session token for creator verification
    * @returns Promise resolving to transaction hash of the end election transaction
    */
-  endElection: (adminAddress: string, contractAddress?: string, electionId?: string) => 
+  endElection: (adminAddress: string, contractAddress?: string, electionId?: string, creatorToken?: string) => 
     // Make POST request with end election data
-    apiPost<{ transactionHash: string }>('/end-election', { adminAddress, contractAddress, electionId }),
+    apiPost<{ transactionHash: string }>('/end-election', { adminAddress, contractAddress, electionId, creatorToken }),
   
   /**
    * Get the winner of an election
@@ -291,36 +292,40 @@ export const api = {
    * @param maxVoters - Maximum number of voters allowed
    * @param durationHours - Duration of the election in hours
    * @param electionId - The election ID for creator tracking
+   * @param creatorToken - The session token for creator verification
    * @returns Promise resolving to contract address and deployment transaction hash
    */
-  deployContract: (candidates: string[], maxVoters: number, durationHours: number, electionId?: string) =>
+  deployContract: (candidates: string[], maxVoters: number, durationHours: number, electionId?: string, creatorToken?: string) =>
     // Make POST request with contract deployment parameters
     apiPost<DeployContractResponse>('/deploy-contract', {
       candidates,
       maxVoters,
       durationHours,
       electionId,
+      creatorToken,
     }),
 
   /**
    * Register the creator of an election (for local elections without contracts)
    * @param electionId - The election ID to register
+   * @param creatorToken - The session token for creator verification
    * @returns Promise resolving to registration confirmation
    */
-  registerElectionCreator: (electionId: string) =>
-    // Make POST request to register creator
-    apiPost<{ electionId: string; creatorIp: string }>('/register-election-creator', { electionId }),
+  registerElectionCreator: (electionId: string, creatorToken: string) =>
+    // Make POST request to register creator with token
+    apiPost<{ electionId: string }>('/register-election-creator', { electionId, creatorToken }),
 
   /**
    * Check if the current user is the creator of an election
    * @param electionId - The election ID to check
+   * @param creatorToken - The session token for creator verification
    * @returns Promise resolving to creator status
    */
-  checkCreator: (electionId: string) => {
-    // Build URL with election ID query parameter
-    const url = `/check-creator?electionId=${encodeURIComponent(electionId)}`;
+  checkCreator: (electionId: string, creatorToken: string) => {
+    // Build URL with election ID and creator token query parameters
+    const url = `/check-creator?electionId=${encodeURIComponent(electionId)}&creatorToken=${encodeURIComponent(creatorToken)}`;
     // Call the API and return creator status
-    return apiCall<{ isCreator: boolean; creatorIp: string | null }>(url);
+    return apiCall<{ isCreator: boolean }>(url);
   },
   
   /**

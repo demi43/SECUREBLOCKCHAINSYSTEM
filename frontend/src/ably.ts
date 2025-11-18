@@ -425,6 +425,35 @@ export interface SessionSyncEvent {
  * Format: 3 letters + 3 numbers (e.g., "ABC123")
  */
 // Export function to generate a short sync code
+/**
+ * Generate a secure random token for creator verification
+ * Uses crypto.randomUUID if available, otherwise falls back to Math.random
+ */
+export function generateCreatorToken(): string {
+  // Use crypto.randomUUID if available (more secure)
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback to timestamp + random string
+  return `token_${Date.now()}_${Math.random().toString(36).substring(2, 15)}_${Math.random().toString(36).substring(2, 15)}`;
+}
+
+/**
+ * Get creator token for an election from localStorage
+ */
+export function getCreatorToken(electionId: string): string | null {
+  const key = `election_${electionId}_creator_token`;
+  return localStorage.getItem(key);
+}
+
+/**
+ * Store creator token for an election in localStorage
+ */
+export function setCreatorToken(electionId: string, token: string): void {
+  const key = `election_${electionId}_creator_token`;
+  localStorage.setItem(key, token);
+}
+
 export function generateSyncCode(): string {
   // Generate 3 random uppercase letters
   const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // Exclude I and O to avoid confusion
