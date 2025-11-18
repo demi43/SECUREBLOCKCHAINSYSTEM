@@ -123,6 +123,18 @@ export interface BlockEvent {
   timestamp: number;
 }
 
+// Define the structure of an election ended event (for cross-device election ending)
+export interface ElectionEndedEvent {
+  // Election ID that was ended
+  electionId: string;
+  // User session ID of the person who ended the election
+  endedBy: string;
+  // Timestamp when the election was ended
+  timestamp: number;
+  // Optional transaction hash if ended on blockchain
+  transactionHash?: string;
+}
+
 /**
  * Subscribe to real-time updates for an election
  */
@@ -322,6 +334,48 @@ export function publishBlockEvent(
 }
 
 /**
+ * Publish an election ended event to sync election ending across devices
+ */
+// Export function to publish an election ended event
+export function publishElectionEnded(
+  // The unique election ID that was ended
+  electionId: string,
+  // Optional transaction hash if ended on blockchain
+  transactionHash?: string
+): void {
+  // Check if Ably client is initialized and election ID is provided
+  if (!ablyClient || !electionId) {
+    // Log warning if publish cannot proceed
+    console.warn('[ABLY] Cannot publish election ended: client not initialized or no election ID');
+    // Exit early if conditions not met
+    return;
+  }
+
+  // Get or create the Ably channel for this specific election
+  const channel = ablyClient.channels.get(`election:${electionId}`);
+  
+  // Get the user session ID of the person ending the election
+  const endedBy = getUserSessionId();
+  
+  // Create the election ended event
+  const endedEvent: ElectionEndedEvent = {
+    electionId: electionId,
+    endedBy: endedBy,
+    timestamp: Date.now(),
+    transactionHash: transactionHash,
+  };
+  
+  // Publish the election ended event to the channel with event name 'election-ended'
+  channel.publish('election-ended', endedEvent).then(() => {
+    // Log success when election ended event is published
+    console.log('[ABLY] Election ended event published successfully');
+  }).catch((err) => {
+    // Log error if publish fails
+    console.error('[ABLY] Failed to publish election ended event:', err);
+  });
+}
+
+/**
  * Enter presence on the election channel (show user is active)
  */
 // Export function to enter presence on the election channel (indicates user is active)
@@ -516,6 +570,7 @@ export interface ElectionDataEvent {
     createdAt: number;
     status: 'active' | 'closed';
     contractAddress?: string;
+    creatorId?: string; // ID of the user who created this election (for admin controls)
   };
   // Optional contract address
   contractAddress?: string;

@@ -33,6 +33,7 @@ import {
   publishVoteEvent,
   publishStatsEvent,
   publishBlockEvent,
+  publishElectionEnded,
   getUserSessionId,
   enterPresence,
   generateSyncCode,
@@ -589,16 +590,18 @@ function App() {
       undefined
     );
 
-    // Subscribe to block events to sync blockchain across devices
+    // Subscribe to block events and election ended events to sync across devices
     let blockUnsubscribe: (() => void) | null = null;
+    let electionEndedUnsubscribe: (() => void) | null = null;
     if (currentElectionId) {
       // Import ablyClient dynamically to access it
       import('./ably').then((ablyModule) => {
         const ablyClient = (ablyModule as any).ablyClient;
         if (ablyClient) {
-          const blockChannel = ablyClient.channels.get(`election:${currentElectionId}`);
+          const electionChannel = ablyClient.channels.get(`election:${currentElectionId}`);
           
-          blockChannel.subscribe('block', (message: any) => {
+          // Subscribe to block events
+          electionChannel.subscribe('block', (message: any) => {
             console.log("[ABLY] Block event received:", message.data);
             const blockEvent = message.data as BlockEvent;
             
@@ -629,9 +632,40 @@ function App() {
             }
           });
           
-          // Store unsubscribe function for block channel
+          // Subscribe to election ended events
+          electionChannel.subscribe('election-ended', (message: any) => {
+            console.log("[ABLY] Election ended event received:", message.data);
+            const endedEvent = message.data as { electionId: string; endedBy: string; timestamp: number; transactionHash?: string };
+            
+            // Only process if it's for the current election
+            if (endedEvent.electionId === currentElectionId && currentElection) {
+              // Update election status to closed
+              const updatedElection: ElectionData = {
+                ...currentElection,
+                election: {
+                  ...currentElection.election,
+                  status: "closed",
+                },
+              };
+              
+              // Update elections state
+              setElections((prev) => {
+                const newMap = new Map(prev);
+                newMap.set(currentElectionId, updatedElection);
+                return newMap;
+              });
+              
+              toast.success("Election has been ended by the creator!");
+              console.log("[ABLY] Election status updated to closed");
+            }
+          });
+          
+          // Store unsubscribe functions
           blockUnsubscribe = () => {
-            blockChannel.unsubscribe('block');
+            electionChannel.unsubscribe('block');
+          };
+          electionEndedUnsubscribe = () => {
+            electionChannel.unsubscribe('election-ended');
           };
         }
       });
@@ -641,6 +675,9 @@ function App() {
       unsubscribe();
       if (blockUnsubscribe) {
         blockUnsubscribe();
+      }
+      if (electionEndedUnsubscribe) {
+        electionEndedUnsubscribe();
       }
       leavePresence();
     };
@@ -964,8 +1001,38 @@ function App() {
     toast.success("Election deleted successfully!");
   }
 
-  function handleEndElection() {
+  async function handleEndElection() {
     if (!currentElection || !currentElectionId) return;
+
+    // Check if user is the creator
+    const currentUserId = getUserSessionId();
+    const creatorId = currentElection.election.creatorId;
+    if (creatorId !== currentUserId) {
+      toast.error("Only the election creator can end the election!");
+      return;
+    }
+
+    // Try to end election on blockchain if contract exists
+    let transactionHash: string | undefined = undefined;
+    const electionContractAddress =
+      currentElection.contractAddress ||
+      currentElection.election.contractAddress;
+
+    if (backendConnected && electionContractAddress) {
+      try {
+        // Call backend API to end election on blockchain
+        const result = await api.endElection(
+          electionContractAddress, // adminAddress (not used but required)
+          electionContractAddress
+        );
+        transactionHash = result.transactionHash;
+        console.log("[END] Election ended on blockchain:", transactionHash);
+      } catch (error) {
+        console.error("[END] Failed to end election on blockchain:", error);
+        toast.warning("Failed to end election on blockchain, but marking as closed locally");
+        // Continue with local ending even if blockchain fails
+      }
+    }
 
     // Mark as local update to prevent circular sync
     isLocalUpdateRef.current = true;
@@ -983,6 +1050,9 @@ function App() {
     setTimeout(() => {
       isLocalUpdateRef.current = false;
     }, 200);
+
+    // Publish election ended event via Ably so all devices are notified
+    publishElectionEnded(currentElectionId, transactionHash);
 
     toast.success("Election ended successfully!");
   }
@@ -1768,7 +1838,9 @@ function App() {
             {/* Only show Blockchain tab to election creator */}
             {(() => {
               const currentUserId = getUserSessionId();
-              const isCreator = currentElection.election.creatorId === currentUserId;
+              const creatorId = currentElection.election.creatorId;
+              // Only show if creatorId exists and matches current user
+              const isCreator = creatorId !== undefined && creatorId === currentUserId;
               return isCreator ? (
                 <TabsTrigger
                   value="blockchain"
@@ -1784,7 +1856,10 @@ function App() {
           {/* Check if current user is the creator of this election */}
           {(() => {
             const currentUserId = getUserSessionId();
-            const isCreator = currentElection.election.creatorId === currentUserId;
+            const creatorId = currentElection.election.creatorId;
+            // Only show if creatorId exists and matches current user
+            const isCreator = creatorId !== undefined && creatorId === currentUserId;
+            console.log('[ADMIN] Creator check:', { creatorId, currentUserId, isCreator });
             return isCreator;
           })() && currentElection.election.status === "active" &&
             Date.now() <= currentElection.election.endTime && (
