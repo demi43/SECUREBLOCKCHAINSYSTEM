@@ -813,7 +813,8 @@ function App() {
         deployResult = await api.deployContract(
           electionData.candidates,
           100, // maxVoters
-          durationHours
+          durationHours,
+          id // Pass election ID for creator tracking
         );
         contractAddress = deployResult.contractAddress;
         console.log("Contract deployed successfully:", contractAddress);
@@ -1077,27 +1078,37 @@ function App() {
   async function handleEndElection() {
     if (!currentElection || !currentElectionId) return;
 
-    // Check if user is the creator - must check both that creatorId exists and matches
-    const currentUserId = getUserSessionId();
-    const creatorId = currentElection.election.creatorId;
-    
-    // Log for debugging
-    console.log('[END ELECTION] Creator check:', { 
-      creatorId, 
-      currentUserId, 
-      match: creatorId === currentUserId,
-      creatorIdExists: creatorId !== undefined 
-    });
-    
-    // Only allow if creatorId exists AND matches current user
-    if (!creatorId || creatorId !== currentUserId) {
-      toast.error("Only the election creator can end the election!");
-      console.warn('[END ELECTION] Unauthorized attempt to end election:', {
-        creatorId,
-        currentUserId,
-        electionId: currentElectionId
-      });
-      return;
+    // Verify creator with backend (IP-based verification)
+    if (backendConnected) {
+      try {
+        const creatorStatus = await api.checkCreator(currentElectionId);
+        if (!creatorStatus.isCreator) {
+          toast.error("Only the election creator can end the election!");
+          console.warn('[END ELECTION] Backend verification failed: not creator');
+          return;
+        }
+        console.log('[END ELECTION] Backend verified creator status');
+      } catch (error) {
+        console.error('[END ELECTION] Failed to verify creator with backend:', error);
+        // Fallback to local check if backend check fails
+        const currentUserId = getUserSessionId();
+        const creatorId = currentElection.election.creatorId;
+        if (!creatorId || creatorId !== currentUserId) {
+          toast.error("Only the election creator can end the election!");
+          return;
+        }
+        console.log('[END ELECTION] Using fallback local creator check');
+      }
+    } else {
+      // Fallback to local check if backend not connected
+      const currentUserId = getUserSessionId();
+      const creatorId = currentElection.election.creatorId;
+      if (!creatorId || creatorId !== currentUserId) {
+        toast.error("Only the election creator can end the election!");
+        console.warn('[END ELECTION] Unauthorized attempt (backend not connected, local check failed)');
+        return;
+      }
+      console.log('[END ELECTION] Backend not connected, using local creator check');
     }
 
     // Try to end election on blockchain if contract exists
@@ -1108,14 +1119,20 @@ function App() {
 
     if (backendConnected && electionContractAddress) {
       try {
-        // Call backend API to end election on blockchain
+        // Call backend API to end election on blockchain (backend will verify IP again)
         const result = await api.endElection(
           electionContractAddress, // adminAddress (not used but required)
-          electionContractAddress
+          electionContractAddress,
+          currentElectionId // Pass election ID for IP verification
         );
         transactionHash = result.transactionHash;
         console.log("[END] Election ended on blockchain:", transactionHash);
-      } catch (error) {
+      } catch (error: any) {
+        // Check if error is due to unauthorized (403)
+        if (error.message && error.message.includes("Only the election creator")) {
+          toast.error("Only the election creator can end the election!");
+          return;
+        }
         console.error("[END] Failed to end election on blockchain:", error);
         toast.warning("Failed to end election on blockchain, but marking as closed locally");
         // Continue with local ending even if blockchain fails

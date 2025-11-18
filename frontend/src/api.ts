@@ -264,11 +264,12 @@ export const api = {
    * End an election (admin only)
    * @param adminAddress - The admin address (for authorization check)
    * @param contractAddress - Optional contract address for election-specific ending
+   * @param electionId - The election ID for creator verification
    * @returns Promise resolving to transaction hash of the end election transaction
    */
-  endElection: (adminAddress: string, contractAddress?: string) => 
+  endElection: (adminAddress: string, contractAddress?: string, electionId?: string) => 
     // Make POST request with end election data
-    apiPost<{ transactionHash: string }>('/end-election', { adminAddress, contractAddress }),
+    apiPost<{ transactionHash: string }>('/end-election', { adminAddress, contractAddress, electionId }),
   
   /**
    * Get the winner of an election
@@ -289,15 +290,29 @@ export const api = {
    * @param candidates - Array of candidate names
    * @param maxVoters - Maximum number of voters allowed
    * @param durationHours - Duration of the election in hours
+   * @param electionId - The election ID for creator tracking
    * @returns Promise resolving to contract address and deployment transaction hash
    */
-  deployContract: (candidates: string[], maxVoters: number, durationHours: number) =>
+  deployContract: (candidates: string[], maxVoters: number, durationHours: number, electionId?: string) =>
     // Make POST request with contract deployment parameters
     apiPost<DeployContractResponse>('/deploy-contract', {
       candidates,
       maxVoters,
       durationHours,
+      electionId,
     }),
+
+  /**
+   * Check if the current user is the creator of an election
+   * @param electionId - The election ID to check
+   * @returns Promise resolving to creator status
+   */
+  checkCreator: (electionId: string) => {
+    // Build URL with election ID query parameter
+    const url = `/check-creator?electionId=${encodeURIComponent(electionId)}`;
+    // Call the API and return creator status
+    return apiCall<{ isCreator: boolean; creatorIp: string | null }>(url);
+  },
   
   /**
    * Check the health status of the backend API

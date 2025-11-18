@@ -79,6 +79,27 @@ def create_web3() -> Web3:
 
 w3 = create_web3()
 
+# Store election creators: electionId -> creatorIP
+# In production, use a database instead of in-memory dict
+election_creators: Dict[str, str] = {}
+
+
+def get_client_ip(request: Request) -> str:
+    """Get client IP address from request, handling proxies."""
+    # Check X-Forwarded-For header (for proxies/load balancers)
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        # X-Forwarded-For can contain multiple IPs, take the first one
+        return forwarded_for.split(",")[0].strip()
+    # Check X-Real-IP header (alternative proxy header)
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    # Fall back to direct client IP
+    if request.client:
+        return request.client.host
+    return "unknown"
+
 
 try:
     checksum_address = Web3.to_checksum_address(CONTRACT_ADDRESS)
@@ -364,16 +385,29 @@ def vote(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/api/deploy-contract")
-def deploy_contract(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Deploy a new SchoolVoting contract with custom candidates."""
+def deploy_contract(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    """Deploy a new SchoolVoting contract with custom candidates.
+    
+    Stores the creator's IP address for later verification when ending elections.
+    """
     _ensure_contract_connection()
     
     candidates = payload.get("candidates", [])
     max_voters = payload.get("maxVoters", 100)
     duration_hours = payload.get("durationHours", 24)
+    election_id = payload.get("electionId")  # Election ID from frontend
     
     if not candidates or len(candidates) < 2:
         raise HTTPException(status_code=400, detail="At least 2 candidates are required")
+    
+    # Get creator IP address
+    creator_ip = get_client_ip(request)
+    print(f"[DEPLOY] Creator IP: {creator_ip}, Election ID: {election_id}")
+    
+    # Store creator info if election ID is provided
+    if election_id:
+        election_creators[election_id] = creator_ip
+        print(f"[DEPLOY] Stored creator IP {creator_ip} for election {election_id}")
     
     if not SERVER_ACCOUNT:
         raise HTTPException(
@@ -445,10 +479,12 @@ def deploy_contract(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/api/end-election")
-def end_election(payload: Dict[str, Any]) -> Dict[str, Any]:
+def end_election(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    """End an election. Verifies that the requester is the creator (by IP address)."""
     _ensure_contract_connection()
     admin_address = payload.get("adminAddress")  # Not used for signing, but kept for compatibility
     contract_address = payload.get("contractAddress")  # Election-specific contract address
+    election_id = payload.get("electionId")  # Election ID from frontend
     
     if not admin_address:
         raise HTTPException(status_code=400, detail="Missing adminAddress")
@@ -458,6 +494,27 @@ def end_election(payload: Dict[str, Any]) -> Dict[str, Any]:
             status_code=500,
             detail="Server account not configured. Set SERVER_PRIVATE_KEY in .env"
         )
+    
+    # Verify creator by IP address
+    if election_id:
+        creator_ip = election_creators.get(election_id)
+        requester_ip = get_client_ip(request)
+        
+        print(f"[END] Election ID: {election_id}")
+        print(f"[END] Creator IP: {creator_ip}, Requester IP: {requester_ip}")
+        
+        if creator_ip:
+            if requester_ip != creator_ip:
+                print(f"[END] Unauthorized: IP mismatch")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only the election creator can end the election"
+                )
+            print(f"[END] Creator verified by IP")
+        else:
+            print(f"[END] Warning: No creator IP stored for election {election_id}, allowing request")
+    else:
+        print(f"[END] Warning: No election ID provided, skipping creator verification")
 
     # Get contract instance for this election
     target_contract = _get_contract_instance(contract_address)
@@ -477,6 +534,27 @@ def end_election(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Transaction failed: {str(exc)}") from exc
+
+
+@app.get("/api/check-creator")
+def check_creator(electionId: str, request: Request) -> Dict[str, Any]:
+    """Check if the current requester is the creator of the election."""
+    creator_ip = election_creators.get(electionId)
+    requester_ip = get_client_ip(request)
+    
+    is_creator = creator_ip is not None and requester_ip == creator_ip
+    
+    print(f"[CHECK] Election ID: {electionId}")
+    print(f"[CHECK] Creator IP: {creator_ip}, Requester IP: {requester_ip}")
+    print(f"[CHECK] Is creator: {is_creator}")
+    
+    return {
+        "success": True,
+        "data": {
+            "isCreator": is_creator,
+            "creatorIp": creator_ip if is_creator else None,  # Only return if they are the creator
+        }
+    }
 
 
 @app.get("/api/winner")

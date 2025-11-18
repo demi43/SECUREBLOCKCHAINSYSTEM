@@ -419,9 +419,7 @@ export function VotingInterface({ onVote, hasVoted, candidates, voterAddress, is
 
               {/* Confirmation dialog - shown before final vote submission */}
               {showConfirmDialog && (
-                // Overlay that closes dialog when clicked
                 <div className="confirm-dialog-overlay" onClick={() => setShowConfirmDialog(false)}>
-                  // Dialog content - stop propagation to prevent closing when clicking inside
                   <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
                     <h3 className="confirm-dialog-title">Confirm Your Vote</h3>
                     {/* Show which candidate was selected */}
