@@ -291,6 +291,154 @@ export function enterPresence(electionId: string, userSessionId: string): () => 
   };
 }
 
+/**
+ * Session Sync Interface - for sharing session IDs across devices via Ably
+ */
+// Define the structure of a session sync event
+export interface SessionSyncEvent {
+  // The session ID being shared
+  sessionId: string;
+  // Timestamp when the session was shared
+  timestamp: number;
+  // Device identifier (optional, for debugging)
+  deviceId?: string;
+}
+
+/**
+ * Generate a short sync code (6 characters) for easy sharing
+ * Format: 3 letters + 3 numbers (e.g., "ABC123")
+ */
+// Export function to generate a short sync code
+export function generateSyncCode(): string {
+  // Generate 3 random uppercase letters
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // Exclude I and O to avoid confusion
+  const letterPart = Array.from({ length: 3 }, () => 
+    letters[Math.floor(Math.random() * letters.length)]
+  ).join('');
+  
+  // Generate 3 random digits
+  const numberPart = Array.from({ length: 3 }, () => 
+    Math.floor(Math.random() * 10)
+  ).join('');
+  
+  // Combine letters and numbers: "ABC123"
+  return `${letterPart}${numberPart}`;
+}
+
+/**
+ * Publish session ID to a sync channel using a sync code
+ * Other devices can subscribe to this channel using the same sync code
+ */
+// Export function to publish session ID to a sync channel
+export function publishSessionId(
+  // The sync code to publish to (e.g., "ABC123")
+  syncCode: string,
+  // The session ID to share
+  sessionId: string
+): Promise<void> {
+  // Check if Ably client is initialized
+  if (!ablyClient) {
+    // Log warning if publish cannot proceed
+    console.warn('[ABLY] Cannot publish session ID: client not initialized');
+    // Return rejected promise if conditions not met
+    return Promise.reject(new Error('Ably client not initialized'));
+  }
+
+  // Get or create the Ably channel for this sync code
+  // Channel name format: "session:sync:ABC123"
+  const channel = ablyClient.channels.get(`session:sync:${syncCode.toUpperCase()}`);
+  
+  // Create the session sync event data
+  const syncEvent: SessionSyncEvent = {
+    sessionId: sessionId,
+    timestamp: Date.now(),
+    deviceId: navigator.userAgent.substring(0, 50), // First 50 chars of user agent
+  };
+
+  // Publish the session ID to the channel with event name 'session-sync'
+  return channel.publish('session-sync', syncEvent).then(() => {
+    // Log success when session ID is published
+    console.log(`[ABLY] Session ID published to sync code: ${syncCode}`);
+  }).catch((err) => {
+    // Log error if publish fails
+    console.error('[ABLY] Failed to publish session ID:', err);
+    throw err;
+  });
+}
+
+/**
+ * Subscribe to a session sync channel and automatically apply the received session ID
+ * Returns an unsubscribe function
+ */
+// Export function to subscribe to a session sync channel
+export function subscribeToSessionSync(
+  // The sync code to subscribe to (e.g., "ABC123")
+  syncCode: string,
+  // Callback function when a session ID is received
+  onSessionReceived: (sessionId: string) => void,
+  // Optional callback for errors
+  onError?: (error: Error) => void
+): () => void {
+  // Check if Ably client is initialized
+  if (!ablyClient) {
+    // Log warning if subscription cannot proceed
+    console.warn('[ABLY] Cannot subscribe to session sync: client not initialized');
+    // Call error callback if provided
+    if (onError) {
+      onError(new Error('Ably client not initialized'));
+    }
+    // Return empty function (no-op unsubscribe) if subscription fails
+    return () => {};
+  }
+
+  // Get or create the Ably channel for this sync code
+  // Channel name format: "session:sync:ABC123"
+  const channel = ablyClient.channels.get(`session:sync:${syncCode.toUpperCase()}`);
+  
+  // Subscribe to session sync events
+  // Listen for 'session-sync' messages on the channel
+  channel.subscribe('session-sync', (message) => {
+    // Log when a session sync event is received
+    console.log('[ABLY] Session sync event received:', message.data);
+    
+    try {
+      // Cast the message data to SessionSyncEvent type
+      const syncEvent = message.data as SessionSyncEvent;
+      
+      // Validate that session ID exists
+      if (syncEvent.sessionId) {
+        // Log the received session ID
+        console.log('[ABLY] Received session ID:', syncEvent.sessionId);
+        // Call the callback with the received session ID
+        onSessionReceived(syncEvent.sessionId);
+      } else {
+        // Log error if session ID is missing
+        console.error('[ABLY] Received session sync event without session ID');
+        if (onError) {
+          onError(new Error('Session sync event missing session ID'));
+        }
+      }
+    } catch (err) {
+      // Log error if parsing fails
+      console.error('[ABLY] Failed to parse session sync event:', err);
+      if (onError) {
+        onError(err as Error);
+      }
+    }
+  });
+
+  // Log successful subscription to the channel
+  console.log(`[ABLY] Subscribed to session sync channel: session:sync:${syncCode.toUpperCase()}`);
+
+  // Return an unsubscribe function that can be called to stop listening
+  return () => {
+    // Unsubscribe from all events on this channel
+    channel.unsubscribe();
+    // Log that we've unsubscribed
+    console.log(`[ABLY] Unsubscribed from session sync channel: session:sync:${syncCode.toUpperCase()}`);
+  };
+}
+
 // Export the ablyClient so it can be used elsewhere if needed
 export { ablyClient };
 
