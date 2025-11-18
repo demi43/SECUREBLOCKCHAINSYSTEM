@@ -303,6 +303,15 @@ export const api = {
     }),
 
   /**
+   * Register the creator of an election (for local elections without contracts)
+   * @param electionId - The election ID to register
+   * @returns Promise resolving to registration confirmation
+   */
+  registerElectionCreator: (electionId: string) =>
+    // Make POST request to register creator
+    apiPost<{ electionId: string; creatorIp: string }>('/register-election-creator', { electionId }),
+
+  /**
    * Check if the current user is the creator of an election
    * @param electionId - The election ID to check
    * @returns Promise resolving to creator status

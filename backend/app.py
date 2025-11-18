@@ -536,6 +536,31 @@ def end_election(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Transaction failed: {str(exc)}") from exc
 
 
+@app.post("/api/register-election-creator")
+def register_election_creator(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    """Register the creator of an election (for local elections without contracts)."""
+    election_id = payload.get("electionId")
+    
+    if not election_id:
+        raise HTTPException(status_code=400, detail="Missing electionId")
+    
+    # Get creator IP address
+    creator_ip = get_client_ip(request)
+    print(f"[REGISTER] Registering creator IP: {creator_ip} for election: {election_id}")
+    
+    # Store creator info
+    election_creators[election_id] = creator_ip
+    print(f"[REGISTER] Stored creator IP {creator_ip} for election {election_id}")
+    
+    return {
+        "success": True,
+        "data": {
+            "electionId": election_id,
+            "creatorIp": creator_ip,
+        }
+    }
+
+
 @app.get("/api/check-creator")
 def check_creator(electionId: str, request: Request) -> Dict[str, Any]:
     """Check if the current requester is the creator of the election."""

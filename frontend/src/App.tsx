@@ -385,6 +385,8 @@ function App() {
     candidates: Candidate[];
     stats: ElectionStats | null;
   } | null>(null);
+  // State: Track creator status from backend (electionId -> isCreator)
+  const [creatorStatus, setCreatorStatus] = useState<Map<string, boolean>>(new Map());
 
   // Sync with other tabs using the custom hook
   const syncKey = useStorageSync();
@@ -392,6 +394,28 @@ function App() {
   // Use a ref to track if we're making a local update (to prevent circular updates)
   // This prevents infinite loops when we update elections and trigger storage events
   const isLocalUpdateRef = useRef(false);
+
+  // Check creator status from backend when election changes
+  useEffect(() => {
+    if (!currentElectionId || !backendConnected) {
+      return;
+    }
+
+    // Check creator status from backend
+    api.checkCreator(currentElectionId)
+      .then((status) => {
+        setCreatorStatus((prev) => {
+          const newMap = new Map(prev);
+          newMap.set(currentElectionId, status.isCreator);
+          return newMap;
+        });
+        console.log(`[CREATOR] Backend creator status for ${currentElectionId}:`, status.isCreator);
+      })
+      .catch((error) => {
+        console.warn(`[CREATOR] Failed to check creator status for ${currentElectionId}:`, error);
+        // Don't update status on error - keep existing or fallback to local check
+      });
+  }, [currentElectionId, backendConnected]);
   
   // Ref to store interval IDs for election data publishing (to clean up on unmount)
   const electionDataIntervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
@@ -826,6 +850,18 @@ function App() {
         );
         // Continue with local blockchain - don't fail the election creation
         toast.info("Using local blockchain (backend not available)");
+      }
+
+      // Register creator with backend (even for local elections)
+      // This ensures IP-based verification works for all elections
+      if (backendConnected) {
+        try {
+          await api.registerElectionCreator(id);
+          console.log(`[CREATE] Registered creator IP for election ${id}`);
+        } catch (error) {
+          console.warn(`[CREATE] Failed to register creator IP for election ${id}:`, error);
+          // Continue anyway - election will still be created
+        }
       }
 
       // Get creator ID (user session ID of the person creating the election)
@@ -1912,9 +1948,23 @@ function App() {
             </TabsTrigger>
             {/* Only show Blockchain tab to election creator */}
             {(() => {
+              // Use backend creator status if available, fallback to local check
+              const backendIsCreator = creatorStatus.get(currentElectionId || '');
+              if (backendConnected && backendIsCreator !== undefined) {
+                // Use backend verification (IP-based)
+                return backendIsCreator ? (
+                  <TabsTrigger
+                    value="blockchain"
+                    className="flex items-center gap-2 data-[state=active]:bg-purple-600"
+                  >
+                    <Shield className="w-4 h-4" />
+                    Blockchain
+                  </TabsTrigger>
+                ) : null;
+              }
+              // Fallback to local check if backend not available or not checked yet
               const currentUserId = getUserSessionId();
               const creatorId = currentElection.election.creatorId;
-              // Only show if creatorId exists and matches current user
               const isCreator = creatorId !== undefined && creatorId === currentUserId;
               return isCreator ? (
                 <TabsTrigger
@@ -1930,16 +1980,26 @@ function App() {
 
           {/* Check if current user is the creator of this election */}
           {(() => {
+            // Use backend creator status if available, fallback to local check
+            const backendIsCreator = creatorStatus.get(currentElectionId || '');
+            if (backendConnected && backendIsCreator !== undefined) {
+              // Use backend verification (IP-based)
+              console.log('[ADMIN] Creator check for End Election button (backend):', { 
+                backendIsCreator,
+                backendConnected
+              });
+              return backendIsCreator;
+            }
+            // Fallback to local check if backend not available or not checked yet
             const currentUserId = getUserSessionId();
             const creatorId = currentElection.election.creatorId;
-            // Only show if creatorId exists and matches current user
             const isCreator = creatorId !== undefined && creatorId !== null && creatorId === currentUserId;
-            console.log('[ADMIN] Creator check for End Election button:', { 
+            console.log('[ADMIN] Creator check for End Election button (local):', { 
+              backendIsCreator,
               creatorId, 
               currentUserId, 
               isCreator,
-              creatorIdType: typeof creatorId,
-              currentUserIdType: typeof currentUserId
+              backendConnected
             });
             return isCreator;
           })() && currentElection.election.status === "active" &&
@@ -2019,6 +2079,17 @@ function App() {
 
           {/* Only show Blockchain tab content to election creator */}
           {(() => {
+            // Use backend creator status if available, fallback to local check
+            const backendIsCreator = creatorStatus.get(currentElectionId || '');
+            if (backendConnected && backendIsCreator !== undefined) {
+              // Use backend verification (IP-based)
+              return backendIsCreator ? (
+                <TabsContent value="blockchain">
+                  <BlockchainViewer blocks={blockchain} isValid={isChainValid} />
+                </TabsContent>
+              ) : null;
+            }
+            // Fallback to local check if backend not available or not checked yet
             const currentUserId = getUserSessionId();
             const isCreator = currentElection.election.creatorId === currentUserId;
             return isCreator ? (
