@@ -693,17 +693,38 @@ function App() {
                   }
                   
                   // Check if this block already exists (prevent duplicates)
+                  // Check by hash (most reliable) and also by index+hash combination
                   const blockExists = currentElection.blockchain.some(
-                    b => b.index === blockEvent.block.index && b.hash === blockEvent.block.hash
+                    b => b.hash === blockEvent.block.hash || 
+                         (b.index === blockEvent.block.index && b.hash === blockEvent.block.hash)
                   );
                   
                   if (blockExists) {
-                    console.log("[ABLY] Block already exists, skipping:", blockEvent.block.index);
+                    console.log("[ABLY] Block already exists, skipping:", blockEvent.block.index, "Hash:", blockEvent.block.hash.slice(0, 10));
                     return prev;
                   }
                   
-                  // Add the new block to the blockchain using latest state
-                  const updatedBlockchain = [...currentElection.blockchain, blockEvent.block];
+                  // Insert block in correct position based on index (not just append)
+                  // This ensures blocks are ordered correctly even if received out of order
+                  const currentBlocks = currentElection.blockchain;
+                  let insertIndex = currentBlocks.length;
+                  
+                  // Find the correct position to insert (maintain sorted order by index)
+                  for (let i = 0; i < currentBlocks.length; i++) {
+                    if (currentBlocks[i].index > blockEvent.block.index) {
+                      insertIndex = i;
+                      break;
+                    }
+                  }
+                  
+                  // Insert block at correct position
+                  const updatedBlockchain = [
+                    ...currentBlocks.slice(0, insertIndex),
+                    blockEvent.block,
+                    ...currentBlocks.slice(insertIndex)
+                  ];
+                  
+                  console.log(`[ABLY] Inserting block at index ${insertIndex}, block index: ${blockEvent.block.index}`);
                   const updatedElection: ElectionData = {
                     ...currentElection,
                     blockchain: updatedBlockchain,
@@ -1301,46 +1322,61 @@ function App() {
         setIsMining(false);
 
           // Add a block to the blockchain display for this vote transaction
-          if (currentElectionId && currentElection) {
-            const lastBlock = currentElection.blockchain[currentElection.blockchain.length - 1];
-            const newBlockIndex = lastBlock ? lastBlock.index + 1 : 1;
-            
-            const voteBlock: Block = {
-              index: newBlockIndex,
-              timestamp: Date.now(),
-              votes: [{
-                voterId: "ANONYMOUS",
-                candidate: candidate,
-                timestamp: Date.now(),
-              }],
-              previousHash: lastBlock ? lastBlock.hash : "0",
-              hash: "",
-              nonce: 0,
-              transactionHash: result.transactionHash,
-              blockType: 'vote',
-            };
-            voteBlock.hash = calculateHash(voteBlock);
-
-            // Update the blockchain with the new vote block
-            const updatedBlockchain = [...currentElection.blockchain, voteBlock];
-            const updatedElection: ElectionData = {
-              ...currentElection,
-              blockchain: updatedBlockchain,
-            };
-
-            // Mark as local update to prevent circular sync
-            isLocalUpdateRef.current = true;
+          if (currentElectionId) {
+            // Use functional update to get latest blockchain state
             setElections((prev) => {
+              const latestElection = prev.get(currentElectionId);
+              if (!latestElection) return prev;
+              
+              const lastBlock = latestElection.blockchain[latestElection.blockchain.length - 1];
+              // Calculate index based on actual blockchain length to avoid duplicates
+              const newBlockIndex = latestElection.blockchain.length;
+              
+              // Check if a block with this index already exists (prevent duplicates)
+              const blockExists = latestElection.blockchain.some(b => b.index === newBlockIndex);
+              if (blockExists) {
+                console.warn(`[VOTE] Block with index ${newBlockIndex} already exists, skipping local block creation`);
+                return prev;
+              }
+              
+              const voteBlock: Block = {
+                index: newBlockIndex,
+                timestamp: Date.now(),
+                votes: [{
+                  voterId: "ANONYMOUS",
+                  candidate: candidate,
+                  timestamp: Date.now(),
+                }],
+                previousHash: lastBlock ? lastBlock.hash : "0",
+                hash: "",
+                nonce: 0,
+                transactionHash: result.transactionHash,
+                blockType: 'vote',
+              };
+              voteBlock.hash = calculateHash(voteBlock);
+
+              // Update the blockchain with the new vote block
+              const updatedBlockchain = [...latestElection.blockchain, voteBlock];
+              const updatedElection: ElectionData = {
+                ...latestElection,
+                blockchain: updatedBlockchain,
+              };
+
+              // Mark as local update to prevent circular sync
+              isLocalUpdateRef.current = true;
+              
               const newMap = new Map(prev);
               newMap.set(currentElectionId, updatedElection);
+              
+              setTimeout(() => {
+                isLocalUpdateRef.current = false;
+              }, 200);
+
+              // Publish block event via Ably so other devices can sync
+              publishBlockEvent(currentElectionId, voteBlock);
+              
               return newMap;
             });
-            setTimeout(() => {
-              isLocalUpdateRef.current = false;
-            }, 200);
-
-            // Publish block event via Ably so other devices can sync
-            publishBlockEvent(currentElectionId, voteBlock);
           }
 
         // Publish vote event to Ably for real-time updates (immediate)
@@ -1473,59 +1509,78 @@ function App() {
             timestamp: Date.now(),
           };
 
-          const lastBlock =
-            currentElection.blockchain[currentElection.blockchain.length - 1];
-          const newBlockIndex = lastBlock.index + 1;
-          console.log(
-            `Creating new block #${newBlockIndex}. Current blockchain length: ${currentElection.blockchain.length}`
-          );
-          const newBlock: Block = {
-            index: newBlockIndex,
-            timestamp: Date.now(),
-            votes: [newVote],
-            previousHash: lastBlock.hash,
-            hash: "",
-            nonce: 0,
-          };
+          // Use functional update to get latest blockchain state
+          setElections((prev) => {
+            const latestElection = prev.get(currentElectionId!);
+            if (!latestElection) {
+              resolve({ success: false, message: "Election not found" });
+              return prev;
+            }
+            
+            const lastBlock = latestElection.blockchain[latestElection.blockchain.length - 1];
+            // Calculate index based on actual blockchain length to avoid duplicates
+            const newBlockIndex = latestElection.blockchain.length;
+            
+            // Check if a block with this index already exists (prevent duplicates)
+            const blockExists = latestElection.blockchain.some(b => b.index === newBlockIndex);
+            if (blockExists) {
+              console.warn(`[VOTE] Block with index ${newBlockIndex} already exists, skipping local block creation`);
+              resolve({ success: false, message: "Block already exists" });
+              return prev;
+            }
+            
+            console.log(
+              `Creating new block #${newBlockIndex}. Current blockchain length: ${latestElection.blockchain.length}`
+            );
+            
+            const newBlock: Block = {
+              index: newBlockIndex,
+              timestamp: Date.now(),
+              votes: [newVote],
+              previousHash: lastBlock.hash,
+              hash: "",
+              nonce: 0,
+            };
 
-          // Second frame: mine the block (this is fast with difficulty 2)
-          requestAnimationFrame(() => {
+            // Mine the block
             const minedBlock = mineBlock(newBlock);
 
-            // Third frame: update state (batch all updates)
-            requestAnimationFrame(() => {
-              const updatedBlockchain = [
-                ...currentElection.blockchain,
-                minedBlock,
-              ];
-              console.log(
-                `Blockchain updated. New length: ${updatedBlockchain.length}, New block index: ${minedBlock.index}`
-              );
+            const updatedBlockchain = [
+              ...latestElection.blockchain,
+              minedBlock,
+            ];
+            console.log(
+              `Blockchain updated. New length: ${updatedBlockchain.length}, New block index: ${minedBlock.index}`
+            );
 
-              const updatedElection: ElectionData = {
-                ...currentElection,
-                blockchain: updatedBlockchain,
-              };
+            const updatedElection: ElectionData = {
+              ...latestElection,
+              blockchain: updatedBlockchain,
+            };
 
-              // Mark as local update to prevent circular sync
-              isLocalUpdateRef.current = true;
+            // Mark as local update to prevent circular sync
+            isLocalUpdateRef.current = true;
 
-              // Publish block event via Ably so other devices can sync
-              if (currentElectionId) {
-                publishBlockEvent(currentElectionId, minedBlock);
-              }
+            // Publish block event via Ably so other devices can sync
+            if (currentElectionId) {
+              publishBlockEvent(currentElectionId, minedBlock);
+            }
 
-              // Batch state updates
-              setElections((prev) => {
-                const newMap = new Map(prev);
-                newMap.set(currentElectionId!, updatedElection);
-                return newMap;
-              });
+            const newMap = new Map(prev);
+            newMap.set(currentElectionId!, updatedElection);
 
-              // Reset the flag after the save effect has completed
-              setTimeout(() => {
-                isLocalUpdateRef.current = false;
-              }, 200);
+            // Reset the flag after the save effect has completed
+            setTimeout(() => {
+              isLocalUpdateRef.current = false;
+            }, 200);
+            
+            resolve({
+              success: true,
+              message: `Vote for ${candidate} recorded successfully!`,
+            });
+            
+            return newMap;
+          });
 
               // Publish vote event to Ably for real-time updates
               if (currentElectionId) {
