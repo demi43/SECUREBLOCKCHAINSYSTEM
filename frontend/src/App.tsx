@@ -32,12 +32,14 @@ import {
   subscribeToElectionUpdates,
   publishVoteEvent,
   publishStatsEvent,
+  publishBlockEvent,
   getUserSessionId,
   enterPresence,
   generateSyncCode,
   publishElectionData,
   subscribeToElectionData,
   type ElectionDataEvent,
+  type BlockEvent,
 } from "./ably";
 // Import TypeScript types for API responses
 import type { Candidate, ElectionStats } from "./api";
@@ -587,8 +589,59 @@ function App() {
       undefined
     );
 
+    // Subscribe to block events to sync blockchain across devices
+    let blockUnsubscribe: (() => void) | null = null;
+    if (currentElectionId) {
+      // Import ablyClient dynamically to access it
+      import('./ably').then((ablyModule) => {
+        const ablyClient = (ablyModule as any).ablyClient;
+        if (ablyClient) {
+          const blockChannel = ablyClient.channels.get(`election:${currentElectionId}`);
+          
+          blockChannel.subscribe('block', (message: any) => {
+            console.log("[ABLY] Block event received:", message.data);
+            const blockEvent = message.data as BlockEvent;
+            
+            // Only process if it's for the current election
+            if (blockEvent.electionId === currentElectionId && currentElection) {
+              // Check if this block already exists (prevent duplicates)
+              const blockExists = currentElection.blockchain.some(
+                b => b.index === blockEvent.block.index && b.hash === blockEvent.block.hash
+              );
+              
+              if (!blockExists) {
+                // Add the new block to the blockchain
+                const updatedBlockchain = [...currentElection.blockchain, blockEvent.block];
+                const updatedElection: ElectionData = {
+                  ...currentElection,
+                  blockchain: updatedBlockchain,
+                };
+                
+                // Update elections state
+                setElections((prev) => {
+                  const newMap = new Map(prev);
+                  newMap.set(currentElectionId, updatedElection);
+                  return newMap;
+                });
+                
+                console.log("[ABLY] Block added to blockchain:", blockEvent.block.index);
+              }
+            }
+          });
+          
+          // Store unsubscribe function for block channel
+          blockUnsubscribe = () => {
+            blockChannel.unsubscribe('block');
+          };
+        }
+      });
+    }
+
     return () => {
       unsubscribe();
+      if (blockUnsubscribe) {
+        blockUnsubscribe();
+      }
       leavePresence();
     };
   }, [currentElectionId, currentElection, backendConnected]);
@@ -671,12 +724,16 @@ function App() {
         toast.info("Using local blockchain (backend not available)");
       }
 
+      // Get creator ID (user session ID of the person creating the election)
+      const creatorId = getUserSessionId();
+      
       const election: Election = {
         ...electionData,
         id,
         createdAt: Date.now(),
         status: "active",
         contractAddress, // Store contract address if deployed
+        creatorId, // Store creator ID for admin controls
       };
 
       // Create genesis block - if contract was deployed, include deployment info
@@ -978,45 +1035,48 @@ function App() {
 
         setIsMining(false);
 
-        // Add a block to the blockchain display for this vote transaction
-        if (currentElectionId && currentElection) {
-          const lastBlock = currentElection.blockchain[currentElection.blockchain.length - 1];
-          const newBlockIndex = lastBlock ? lastBlock.index + 1 : 1;
-          
-          const voteBlock: Block = {
-            index: newBlockIndex,
-            timestamp: Date.now(),
-            votes: [{
-              voterId: "ANONYMOUS",
-              candidate: candidate,
+          // Add a block to the blockchain display for this vote transaction
+          if (currentElectionId && currentElection) {
+            const lastBlock = currentElection.blockchain[currentElection.blockchain.length - 1];
+            const newBlockIndex = lastBlock ? lastBlock.index + 1 : 1;
+            
+            const voteBlock: Block = {
+              index: newBlockIndex,
               timestamp: Date.now(),
-            }],
-            previousHash: lastBlock ? lastBlock.hash : "0",
-            hash: "",
-            nonce: 0,
-            transactionHash: result.transactionHash,
-            blockType: 'vote',
-          };
-          voteBlock.hash = calculateHash(voteBlock);
+              votes: [{
+                voterId: "ANONYMOUS",
+                candidate: candidate,
+                timestamp: Date.now(),
+              }],
+              previousHash: lastBlock ? lastBlock.hash : "0",
+              hash: "",
+              nonce: 0,
+              transactionHash: result.transactionHash,
+              blockType: 'vote',
+            };
+            voteBlock.hash = calculateHash(voteBlock);
 
-          // Update the blockchain with the new vote block
-          const updatedBlockchain = [...currentElection.blockchain, voteBlock];
-          const updatedElection: ElectionData = {
-            ...currentElection,
-            blockchain: updatedBlockchain,
-          };
+            // Update the blockchain with the new vote block
+            const updatedBlockchain = [...currentElection.blockchain, voteBlock];
+            const updatedElection: ElectionData = {
+              ...currentElection,
+              blockchain: updatedBlockchain,
+            };
 
-          // Mark as local update to prevent circular sync
-          isLocalUpdateRef.current = true;
-          setElections((prev) => {
-            const newMap = new Map(prev);
-            newMap.set(currentElectionId, updatedElection);
-            return newMap;
-          });
-          setTimeout(() => {
-            isLocalUpdateRef.current = false;
-          }, 200);
-        }
+            // Mark as local update to prevent circular sync
+            isLocalUpdateRef.current = true;
+            setElections((prev) => {
+              const newMap = new Map(prev);
+              newMap.set(currentElectionId, updatedElection);
+              return newMap;
+            });
+            setTimeout(() => {
+              isLocalUpdateRef.current = false;
+            }, 200);
+
+            // Publish block event via Ably so other devices can sync
+            publishBlockEvent(currentElectionId, voteBlock);
+          }
 
         // Publish vote event to Ably for real-time updates (immediate)
         if (currentElectionId) {
@@ -1184,6 +1244,11 @@ function App() {
 
               // Mark as local update to prevent circular sync
               isLocalUpdateRef.current = true;
+
+              // Publish block event via Ably so other devices can sync
+              if (currentElectionId) {
+                publishBlockEvent(currentElectionId, minedBlock);
+              }
 
               // Batch state updates
               setElections((prev) => {
@@ -1700,14 +1765,62 @@ function App() {
               <BarChart3 className="w-4 h-4" />
               Results
             </TabsTrigger>
-            <TabsTrigger
-              value="blockchain"
-              className="flex items-center gap-2 data-[state=active]:bg-purple-600"
-            >
-              <Shield className="w-4 h-4" />
-              Blockchain
-            </TabsTrigger>
+            {/* Only show Blockchain tab to election creator */}
+            {(() => {
+              const currentUserId = getUserSessionId();
+              const isCreator = currentElection.election.creatorId === currentUserId;
+              return isCreator ? (
+                <TabsTrigger
+                  value="blockchain"
+                  className="flex items-center gap-2 data-[state=active]:bg-purple-600"
+                >
+                  <Shield className="w-4 h-4" />
+                  Blockchain
+                </TabsTrigger>
+              ) : null;
+            })()}
           </TabsList>
+
+          {/* Check if current user is the creator of this election */}
+          {(() => {
+            const currentUserId = getUserSessionId();
+            const isCreator = currentElection.election.creatorId === currentUserId;
+            return isCreator;
+          })() && currentElection.election.status === "active" &&
+            Date.now() <= currentElection.election.endTime && (
+              <div className="mb-4 flex justify-end">
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button
+                      variant="destructive"
+                      className="bg-red-600 hover:bg-red-500"
+                    >
+                      End Election Now
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent className="alert-dialog-content">
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>End Election?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        Are you sure you want to end this election? This action
+                        cannot be undone.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel className="bg-slate-800 border-slate-700 text-gray-300 hover:bg-slate-700">
+                        Cancel
+                      </AlertDialogCancel>
+                      <AlertDialogAction
+                        onClick={handleEndElection}
+                        className="bg-red-600 hover:bg-red-500"
+                      >
+                        End Election
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              </div>
+            )}
 
           {currentElection.election.status === "active" &&
             Date.now() <= currentElection.election.endTime && (
@@ -1748,9 +1861,16 @@ function App() {
             />
           </TabsContent>
 
-          <TabsContent value="blockchain">
-            <BlockchainViewer blocks={blockchain} isValid={isChainValid} />
-          </TabsContent>
+          {/* Only show Blockchain tab content to election creator */}
+          {(() => {
+            const currentUserId = getUserSessionId();
+            const isCreator = currentElection.election.creatorId === currentUserId;
+            return isCreator ? (
+              <TabsContent value="blockchain">
+                <BlockchainViewer blocks={blockchain} isValid={isChainValid} />
+              </TabsContent>
+            ) : null;
+          })()}
         </Tabs>
       </div>
     </div>

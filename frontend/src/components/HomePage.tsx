@@ -54,6 +54,8 @@ export interface Election {
   status: 'active' | 'closed';
   // Optional Ethereum contract address if election is deployed to blockchain
   contractAddress?: string;
+  // ID of the user who created this election (for admin controls)
+  creatorId?: string;
 }
 
 /**

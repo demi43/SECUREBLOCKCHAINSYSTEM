@@ -99,6 +99,30 @@ export interface UserVoteStatus {
   votedAt?: number;
 }
 
+// Define the structure of a block event (for syncing blockchain across devices)
+export interface BlockEvent {
+  // The block data to sync
+  block: {
+    index: number;
+    timestamp: number;
+    votes: Array<{
+      voterId: string;
+      candidate: string;
+      timestamp: number;
+    }>;
+    previousHash: string;
+    hash: string;
+    nonce: number;
+    transactionHash?: string;
+    blockType?: 'genesis' | 'vote' | 'deployment';
+    contractAddress?: string;
+  };
+  // Election ID this block belongs to
+  electionId: string;
+  // Timestamp when the block was created
+  timestamp: number;
+}
+
 /**
  * Subscribe to real-time updates for an election
  */
@@ -256,6 +280,44 @@ export function publishStatsEvent(
   }).catch((err) => {
     // Log error if publish fails
     console.error('[ABLY] Failed to publish stats event:', err);
+  });
+}
+
+/**
+ * Publish a block event to sync blockchain across devices
+ */
+// Export function to publish a block event to all subscribers
+export function publishBlockEvent(
+  // The unique election ID to publish to
+  electionId: string,
+  // The block data to publish
+  block: BlockEvent['block']
+): void {
+  // Check if Ably client is initialized and election ID is provided
+  if (!ablyClient || !electionId) {
+    // Log warning if publish cannot proceed
+    console.warn('[ABLY] Cannot publish block: client not initialized or no election ID');
+    // Exit early if conditions not met
+    return;
+  }
+
+  // Get or create the Ably channel for this specific election
+  const channel = ablyClient.channels.get(`election:${electionId}`);
+  
+  // Create the block event
+  const blockEvent: BlockEvent = {
+    block: block,
+    electionId: electionId,
+    timestamp: Date.now(),
+  };
+  
+  // Publish the block event to the channel with event name 'block'
+  channel.publish('block', blockEvent).then(() => {
+    // Log success when block event is published
+    console.log('[ABLY] Block event published successfully');
+  }).catch((err) => {
+    // Log error if publish fails
+    console.error('[ABLY] Failed to publish block event:', err);
   });
 }
 
