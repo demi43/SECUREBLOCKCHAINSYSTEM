@@ -179,7 +179,7 @@ function loadElectionsFromStorage(): Map<string, ElectionData> {
       // Extract contract address (may be in election object or top level)
       const contractAddress =
         electionData.contractAddress || electionData.election?.contractAddress;
-      // Check if this is metadata-only storage (contract elections)
+      // Check if this is metadata-only storage (for backwards compatibility with old data)
       const isMetadataOnly = electionData.metadataOnly === true;
 
       // Log election details for debugging
@@ -192,29 +192,35 @@ function loadElectionsFromStorage(): Map<string, ElectionData> {
       });
 
       // Handle contract elections (deployed to blockchain)
-      if (isMetadataOnly && contractAddress) {
-        // This is a contract election - only metadata was saved
-        // Create a minimal ElectionData with genesis block
-        // Real blockchain data will be loaded from backend
-        const genesisBlock: Block = {
-          index: 0, // Genesis block is always index 0
-          timestamp: electionData.election.createdAt || Date.now(), // Use creation time
-          votes: [], // No votes in genesis block
-          previousHash: "0", // Genesis has no previous block
-          hash: "", // Will be calculated
-          nonce: 0, // No mining needed for genesis
-        };
-        // Calculate hash for the genesis block
-        genesisBlock.hash = calculateHash(genesisBlock);
+      // Check by contract address (new way) or metadataOnly flag (old way for backwards compatibility)
+      if (contractAddress) {
+        // This is a contract election - load metadata and blockchain blocks if available
+        // If blockchain exists, use it; otherwise create genesis block
+        const savedBlockchain = electionData.blockchain || [];
+        const blockchain = savedBlockchain.length > 0 
+          ? savedBlockchain 
+          : (() => {
+              // Create genesis block if no blockchain saved
+              const genesisBlock: Block = {
+                index: 0,
+                timestamp: electionData.election.createdAt || Date.now(),
+                votes: [],
+                previousHash: "0",
+                hash: "",
+                nonce: 0,
+              };
+              genesisBlock.hash = calculateHash(genesisBlock);
+              return [genesisBlock];
+            })();
 
-        // Store election with just metadata and genesis block
+        // Store election with metadata and blockchain blocks
         electionsMap.set(id, {
           election: electionData.election,
-          blockchain: [genesisBlock], // Start with genesis block, backend will provide real data
+          blockchain: blockchain, // Load saved blockchain or use genesis
           contractAddress: contractAddress,
         });
         console.log(
-          `Loaded contract election ${id} metadata (blockchain will load from backend)`
+          `Loaded contract election ${id} with ${blockchain.length} blocks`
         );
       } else {
         // Local-only election - load everything including full blockchain
@@ -262,11 +268,10 @@ function saveElectionsToStorage(elections: Map<string, ElectionData>) {
 
       // Handle contract elections (deployed to blockchain)
       if (contractAddress) {
-        // Save ONLY election metadata (title, description, candidates, endTime, contractAddress)
-        // Do NOT save blockchain or vote data - that comes from backend/blockchain
-        // This prevents localStorage tampering and ensures data integrity
+        // Save election metadata AND blockchain blocks (for display purposes)
+        // Vote counts are still authoritative from backend, but blocks are saved for visualization
         console.log(
-          `Saving election ${id} metadata only (contract at ${contractAddress})`
+          `Saving election ${id} with blockchain display (contract at ${contractAddress})`
         );
         toStore[id] = {
           election: {
@@ -280,10 +285,10 @@ function saveElectionsToStorage(elections: Map<string, ElectionData>) {
             contractAddress: contractAddress,
             creatorId: data.election.creatorId, // Include creatorId for admin controls
           },
-          // Don't save blockchain for contracts - they're on blockchain
-          blockchain: null, // Will be loaded from backend
+          // Save blockchain blocks for display (vote counts still come from backend)
+          blockchain: data.blockchain || [], // Save blockchain blocks for visualization
           contractAddress: contractAddress,
-          metadataOnly: true, // Flag to indicate this is metadata-only
+          metadataOnly: false, // Changed to false since we're saving blockchain now
         };
         metadataOnlyCount++;
       } else {
@@ -310,7 +315,7 @@ function saveElectionsToStorage(elections: Map<string, ElectionData>) {
     );
     // Log save summary
     console.log(
-      `Saved ${savedCount} local-only elections and ${metadataOnlyCount} contract election metadata to localStorage`
+      `Saved ${savedCount} local-only elections and ${metadataOnlyCount} contract elections to localStorage`
     );
   } catch (err) {
     // If save fails, log error (don't crash the app)
