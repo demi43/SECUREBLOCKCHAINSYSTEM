@@ -439,6 +439,144 @@ export function subscribeToSessionSync(
   };
 }
 
+/**
+ * Election Data Interface - for sharing election metadata across devices
+ */
+// Define the structure of election data event
+export interface ElectionDataEvent {
+  // Election metadata
+  election: {
+    id: string;
+    title: string;
+    description?: string;
+    candidates: string[];
+    endTime: number;
+    createdAt: number;
+    status: 'active' | 'closed';
+    contractAddress?: string;
+  };
+  // Optional contract address
+  contractAddress?: string;
+  // Timestamp when the election data was shared
+  timestamp: number;
+}
+
+/**
+ * Publish election data to an Ably channel so other devices can join
+ * This allows elections created on one device to be accessible on other devices
+ */
+// Export function to publish election data to a channel
+export function publishElectionData(
+  // The election ID to publish to
+  electionId: string,
+  // The election data to share
+  electionData: ElectionDataEvent['election'],
+  // Optional contract address
+  contractAddress?: string
+): Promise<void> {
+  // Check if Ably client is initialized
+  if (!ablyClient) {
+    // Log warning if publish cannot proceed
+    console.warn('[ABLY] Cannot publish election data: client not initialized');
+    // Return rejected promise if conditions not met
+    return Promise.reject(new Error('Ably client not initialized'));
+  }
+
+  // Get or create the Ably channel for this election data
+  // Channel name format: "election:data:ABC123"
+  const channel = ablyClient.channels.get(`election:data:${electionId.toUpperCase()}`);
+  
+  // Create the election data event
+  const dataEvent: ElectionDataEvent = {
+    election: electionData,
+    contractAddress: contractAddress,
+    timestamp: Date.now(),
+  };
+
+  // Publish the election data to the channel with event name 'election-data'
+  return channel.publish('election-data', dataEvent).then(() => {
+    // Log success when election data is published
+    console.log(`[ABLY] Election data published for: ${electionId}`);
+  }).catch((err) => {
+    // Log error if publish fails
+    console.error('[ABLY] Failed to publish election data:', err);
+    throw err;
+  });
+}
+
+/**
+ * Subscribe to election data channel and receive election metadata
+ * Returns an unsubscribe function
+ */
+// Export function to subscribe to an election data channel
+export function subscribeToElectionData(
+  // The election ID to subscribe to
+  electionId: string,
+  // Callback function when election data is received
+  onElectionReceived: (data: ElectionDataEvent) => void,
+  // Optional callback for errors
+  onError?: (error: Error) => void
+): () => void {
+  // Check if Ably client is initialized
+  if (!ablyClient) {
+    // Log warning if subscription cannot proceed
+    console.warn('[ABLY] Cannot subscribe to election data: client not initialized');
+    // Call error callback if provided
+    if (onError) {
+      onError(new Error('Ably client not initialized'));
+    }
+    // Return empty function (no-op unsubscribe) if subscription fails
+    return () => {};
+  }
+
+  // Get or create the Ably channel for this election data
+  // Channel name format: "election:data:ABC123"
+  const channel = ablyClient.channels.get(`election:data:${electionId.toUpperCase()}`);
+  
+  // Subscribe to election data events
+  // Listen for 'election-data' messages on the channel
+  channel.subscribe('election-data', (message) => {
+    // Log when an election data event is received
+    console.log('[ABLY] Election data event received:', message.data);
+    
+    try {
+      // Cast the message data to ElectionDataEvent type
+      const dataEvent = message.data as ElectionDataEvent;
+      
+      // Validate that election data exists
+      if (dataEvent.election) {
+        // Log the received election data
+        console.log('[ABLY] Received election data:', dataEvent.election.id);
+        // Call the callback with the received election data
+        onElectionReceived(dataEvent);
+      } else {
+        // Log error if election data is missing
+        console.error('[ABLY] Received election data event without election data');
+        if (onError) {
+          onError(new Error('Election data event missing election data'));
+        }
+      }
+    } catch (err) {
+      // Log error if parsing fails
+      console.error('[ABLY] Failed to parse election data event:', err);
+      if (onError) {
+        onError(err as Error);
+      }
+    }
+  });
+
+  // Log successful subscription to the channel
+  console.log(`[ABLY] Subscribed to election data channel: election:data:${electionId.toUpperCase()}`);
+
+  // Return an unsubscribe function that can be called to stop listening
+  return () => {
+    // Unsubscribe from all events on this channel
+    channel.unsubscribe();
+    // Log that we've unsubscribed
+    console.log(`[ABLY] Unsubscribed from election data channel: election:data:${electionId.toUpperCase()}`);
+  };
+}
+
 // Export the ablyClient so it can be used elsewhere if needed
 export { ablyClient };
 

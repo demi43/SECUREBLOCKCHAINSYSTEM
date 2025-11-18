@@ -36,7 +36,10 @@ import {
   getUserSessionId,
   enterPresence,
   generateSyncCode,
+  publishElectionData,
+  subscribeToElectionData,
   type UserVoteStatus,
+  type ElectionDataEvent,
 } from "./ably";
 // Import TypeScript types for API responses
 import type { Candidate, ElectionStats } from "./api";
@@ -763,6 +766,27 @@ function App() {
         return newMap;
       });
 
+      // Publish election data to Ably channel so other devices can join
+      // This allows elections created on one device to be accessible on other devices
+      publishElectionData(id, election, contractAddress)
+        .then(() => {
+          console.log(`[ABLY] Election data published for: ${id}`);
+          // Keep publishing every 10 seconds while election is active
+          // This ensures devices joining later can still receive the data
+          const interval = setInterval(() => {
+            publishElectionData(id, election, contractAddress).catch((err) => {
+              console.warn(`[ABLY] Failed to republish election data for ${id}:`, err);
+            });
+          }, 10000);
+          
+          // Store interval ID to clear when election ends or component unmounts
+          (window as any)[`__electionData_${id}`] = interval;
+        })
+        .catch((err) => {
+          console.warn('[ABLY] Failed to publish election data:', err);
+          // Don't fail election creation if Ably fails - election can still work locally
+        });
+
       // Set current election ID after state update is committed
       // Use a longer delay to ensure the Map update has propagated
       setTimeout(() => {
@@ -810,25 +834,73 @@ function App() {
       setCurrentElectionId(normalizedId);
       toast.success("Joined election successfully!");
     } else {
-      // Election not found locally
-      // Note: Elections are stored per-browser in localStorage
-      // If the election was created on another device, you'll need the Election ID
-      // The Election ID is the access key - anyone with it can vote
-      console.warn(
-        "Election not found. Available elections:",
-        Array.from(elections.keys())
+      // Election not found locally - try to fetch it via Ably
+      console.log("Election not found locally, attempting to fetch via Ably...");
+      toast.info("Fetching election data...");
+      
+      // Subscribe to election data channel for this election ID
+      let timeoutId: ReturnType<typeof setTimeout>;
+      const unsubscribe = subscribeToElectionData(
+        normalizedId,
+        (dataEvent: ElectionDataEvent) => {
+          // Received election data - store it and join
+          clearTimeout(timeoutId);
+          console.log("[ABLY] Received election data, storing and joining...");
+          
+          // Create genesis block for the election
+          const genesisBlock: Block = {
+            index: 0,
+            timestamp: dataEvent.election.createdAt || Date.now(),
+            votes: [],
+            previousHash: "0",
+            hash: "",
+            nonce: 0,
+            blockType: 'genesis',
+            contractAddress: dataEvent.contractAddress,
+          };
+          genesisBlock.hash = calculateHash(genesisBlock);
+          
+          // Create ElectionData from received data
+          const newElectionData: ElectionData = {
+            election: dataEvent.election,
+            blockchain: [genesisBlock],
+            contractAddress: dataEvent.contractAddress,
+          };
+          
+          // Store election in state and localStorage
+          setElections((prev) => {
+            const newMap = new Map(prev);
+            newMap.set(normalizedId, newElectionData);
+            return newMap;
+          });
+          
+          // Join the election
+          setCurrentElectionId(normalizedId);
+          unsubscribe();
+          toast.success("Election data received! Joined successfully!");
+        },
+        (error) => {
+          clearTimeout(timeoutId);
+          console.error('Failed to fetch election data:', error);
+          toast.error(
+            `Election "${normalizedId}" not found!\n\n` +
+            `The election may not exist or the creator hasn't shared it yet.\n` +
+            `Make sure you have the correct Election ID.`
+          );
+        }
       );
       
-      toast.error(
-        `Election "${normalizedId}" not found in this browser!\n\n` +
-        `Elections are stored per-browser. If this election was created on another device,\n` +
-        `make sure you have the correct Election ID from the creator.\n\n` +
-        `Available elections in this browser: ${
-          elections.size > 0
-            ? Array.from(elections.keys()).join(", ")
-            : "none"
-        }`
-      );
+      // Auto-unsubscribe after 10 seconds if no response
+      timeoutId = setTimeout(() => {
+        unsubscribe();
+        toast.warning(
+          `Election "${normalizedId}" not found.\n\n` +
+          `Make sure:\n` +
+          `1. The Election ID is correct\n` +
+          `2. The election creator has shared the Election ID\n` +
+          `3. Both devices are online`
+        );
+      }, 10000);
     }
   }
 
