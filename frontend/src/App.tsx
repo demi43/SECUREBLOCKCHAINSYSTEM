@@ -32,13 +32,11 @@ import {
   subscribeToElectionUpdates,
   publishVoteEvent,
   publishStatsEvent,
-  publishUserVoteStatus,
   getUserSessionId,
   enterPresence,
   generateSyncCode,
   publishElectionData,
   subscribeToElectionData,
-  type UserVoteStatus,
   type ElectionDataEvent,
 } from "./ably";
 // Import TypeScript types for API responses
@@ -383,11 +381,6 @@ function App() {
     candidates: Candidate[];
     stats: ElectionStats | null;
   } | null>(null);
-  // State: Map of user vote status per election (for cross-device sync via Ably)
-  // Key: electionId, Value: UserVoteStatus
-  const [userVoteStatus, setUserVoteStatus] = useState<
-    Map<string, UserVoteStatus>
-  >(new Map());
 
   // Sync with other tabs using the custom hook
   const syncKey = useStorageSync();
@@ -540,19 +533,12 @@ function App() {
     // Returns a cleanup function to leave presence when component unmounts
     const leavePresence = enterPresence(currentElectionId, userSessionId);
 
-    // Check if this user session has voted (from localStorage)
-    const voteStatusKey = `election_${currentElectionId}_user_${userSessionId}`;
-    const storedVoteStatus = localStorage.getItem(voteStatusKey);
-    if (storedVoteStatus) {
-      try {
-        const status: UserVoteStatus = JSON.parse(storedVoteStatus);
-        setUserVoteStatus((prev) =>
-          new Map(prev).set(currentElectionId, status)
-        );
-        console.log("[ABLY] Loaded vote status from localStorage:", status);
-      } catch (e) {
-        console.error("[ABLY] Failed to parse stored vote status:", e);
-      }
+    // Check if this device has voted (per-device tracking only)
+    // Note: Each device votes independently - no cross-device sync
+    const deviceVoteKey = `election_${currentElectionId}_device_voted`;
+    const hasVotedOnThisDevice = localStorage.getItem(deviceVoteKey) === 'true';
+    if (hasVotedOnThisDevice) {
+      console.log("[VOTE] This device has already voted in this election");
     }
 
     const unsubscribe = subscribeToElectionUpdates(
@@ -561,20 +547,8 @@ function App() {
       (voteData) => {
         console.log("[ABLY] Vote received from another client:", voteData);
 
-        // If this is our vote from another device, update local state
-        if (voteData.userSessionId === userSessionId) {
-          console.log("[ABLY] This is our vote from another device!");
-          const status: UserVoteStatus = {
-            userSessionId: voteData.userSessionId,
-            hasVoted: true,
-            votedCandidate: voteData.candidate,
-            votedAt: voteData.timestamp,
-          };
-          setUserVoteStatus((prev) =>
-            new Map(prev).set(currentElectionId, status)
-          );
-          localStorage.setItem(voteStatusKey, JSON.stringify(status));
-        }
+        // Note: We no longer sync vote status across devices
+        // Each device can vote independently
 
         toast.success(`New vote cast for ${voteData.candidate}!`);
 
@@ -609,18 +583,8 @@ function App() {
           },
         });
       },
-      // onUserVoteStatus callback - sync vote status across devices
-      (statusData) => {
-        console.log("[ABLY] User vote status received:", statusData);
-
-        // Only update if it's for our user session
-        if (statusData.userSessionId === userSessionId) {
-          setUserVoteStatus((prev) =>
-            new Map(prev).set(currentElectionId, statusData)
-          );
-          localStorage.setItem(voteStatusKey, JSON.stringify(statusData));
-        }
-      }
+      // Note: User vote status sync removed - each device votes independently
+      undefined
     );
 
     return () => {
@@ -1065,21 +1029,9 @@ function App() {
             transactionHash: result.transactionHash,
           });
 
-          // Publish user vote status for cross-device sync (immediate)
-          const voteStatus: UserVoteStatus = {
-            userSessionId: userSessionId,
-            hasVoted: true,
-            votedCandidate: candidate,
-            votedAt: Date.now(),
-          };
-          publishUserVoteStatus(currentElectionId, voteStatus);
-          setUserVoteStatus((prev) =>
-            new Map(prev).set(currentElectionId, voteStatus)
-          );
-          localStorage.setItem(
-            `election_${currentElectionId}_user_${userSessionId}`,
-            JSON.stringify(voteStatus)
-          );
+          // Mark this device as having voted (per-device tracking)
+          const deviceVoteKey = `election_${currentElectionId}_device_voted`;
+          localStorage.setItem(deviceVoteKey, 'true');
         }
 
         // Wait for transaction to be mined and blockchain state to update before refreshing
@@ -1174,16 +1126,13 @@ function App() {
       // Fallback to local blockchain simulation
       console.log("Backend not connected, using local blockchain simulation");
 
-      // Check if user has voted using Ably sync (cross-device)
+      // Check if this device has already voted (per-device tracking only)
+      // Each device can vote independently - no cross-device blocking
       if (currentElectionId) {
-        const userSessionId = getUserSessionId();
-        const userStatus = userVoteStatus.get(currentElectionId);
-        if (
-          userStatus &&
-          userStatus.userSessionId === userSessionId &&
-          userStatus.hasVoted
-        ) {
-          return { success: false, message: "You have already voted!" };
+        const deviceVoteKey = `election_${currentElectionId}_device_voted`;
+        const hasVotedOnThisDevice = localStorage.getItem(deviceVoteKey) === 'true';
+        if (hasVotedOnThisDevice) {
+          return { success: false, message: "You have already voted on this device!" };
         }
       }
 
@@ -1258,21 +1207,9 @@ function App() {
                   timestamp: Date.now(),
                 });
 
-                // Publish user vote status for cross-device sync
-                const voteStatus: UserVoteStatus = {
-                  userSessionId: userSessionId,
-                  hasVoted: true,
-                  votedCandidate: candidate,
-                  votedAt: Date.now(),
-                };
-                publishUserVoteStatus(currentElectionId, voteStatus);
-                setUserVoteStatus((prev) =>
-                  new Map(prev).set(currentElectionId, voteStatus)
-                );
-                localStorage.setItem(
-                  `election_${currentElectionId}_user_${userSessionId}`,
-                  JSON.stringify(voteStatus)
-                );
+                // Mark this device as having voted (per-device tracking)
+                const deviceVoteKey = `election_${currentElectionId}_device_voted`;
+                localStorage.setItem(deviceVoteKey, 'true');
 
                 // Calculate and publish stats
                 const updatedVotes = updatedBlockchain.flatMap(
@@ -1790,14 +1727,11 @@ function App() {
                   hasVoted={(() => {
                     if (!currentElectionId) return false;
 
-                    // Check user vote status (cross-device sync via Ably)
-                    const userSessionId = getUserSessionId();
-                    const userStatus = userVoteStatus.get(currentElectionId);
-                    return !!(
-                      userStatus &&
-                      userStatus.userSessionId === userSessionId &&
-                      userStatus.hasVoted
-                    );
+                    // Check if this device has voted (per-device tracking only)
+                    // Each device can vote independently - no cross-device blocking
+                    const deviceVoteKey = `election_${currentElectionId}_device_voted`;
+                    const hasVotedOnThisDevice = localStorage.getItem(deviceVoteKey) === 'true';
+                    return hasVotedOnThisDevice;
                   })()}
                   candidates={candidatesWithVotes}
                   voterAddress={undefined}
