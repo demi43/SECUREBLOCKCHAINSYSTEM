@@ -35,10 +35,7 @@ import { toast } from 'sonner';
 // Import Ably functions for session sync
 import { 
   getUserSessionId, 
-  setUserSessionId, 
-  generateSyncCode, 
-  publishSessionId, 
-  subscribeToSessionSync 
+  setUserSessionId
 } from '../ably';
 
 /**
@@ -101,11 +98,6 @@ export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, e
   const [showSessionSync, setShowSessionSync] = useState(false);
   const [sessionIdInput, setSessionIdInput] = useState('');
   const [sessionIdCopied, setSessionIdCopied] = useState(false);
-  // State for Ably-based session sync
-  const [syncCode, setSyncCode] = useState<string>('');
-  const [syncCodeInput, setSyncCodeInput] = useState('');
-  const [isSharing, setIsSharing] = useState(false);
-  const [isReceiving, setIsReceiving] = useState(false);
   // State for the new election form data
   const [newElection, setNewElection] = useState({
     title: '',           // Election title
@@ -246,168 +238,21 @@ export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, e
               </div>
               
               {showSessionSync && (
-                <div className="mt-4 pt-4 border-t border-slate-700/50 space-y-4">
-                  {/* Ably-based Session Sync (Recommended) */}
-                  <div className="space-y-3">
+                <div className="mt-4 pt-4 border-t border-slate-700/50 space-y-3">
+                  <div className="bg-slate-800/30 p-3 rounded-lg border border-purple-500/20">
                     <div className="flex items-center gap-2 mb-2">
                       <Shield className="w-4 h-4 text-green-400" />
-                      <Label className="text-sm font-semibold text-gray-300">Automatic Sync (via Ably)</Label>
+                      <Label className="text-sm font-semibold text-gray-300">How Cross-Device Voting Works</Label>
                     </div>
-                    
-                    {/* Share Session - Device 1 */}
-                    <div className="bg-slate-800/30 p-3 rounded-lg border border-purple-500/20">
-                      <Label className="text-xs text-gray-400 mb-2 block">Share your session (Device 1):</Label>
-                      {!syncCode ? (
-                        <Button
-                          size="sm"
-                          onClick={() => {
-                            const newSyncCode = generateSyncCode();
-                            setSyncCode(newSyncCode);
-                            setIsSharing(true);
-                            
-                            // Publish session ID to Ably channel
-                            publishSessionId(newSyncCode, getUserSessionId())
-                              .then(() => {
-                                toast.success(`Sync code generated! Share "${newSyncCode}" with your other device`);
-                                // Keep publishing every 5 seconds while sharing
-                                const interval = setInterval(() => {
-                                  publishSessionId(newSyncCode, getUserSessionId()).catch(console.error);
-                                }, 5000);
-                                
-                                // Store interval ID to clear later
-                                (window as any).__sessionSyncInterval = interval;
-                              })
-                              .catch((err) => {
-                                console.error('Failed to publish session ID:', err);
-                                toast.error('Failed to start sharing. Check Ably configuration.');
-                                setIsSharing(false);
-                                setSyncCode('');
-                              });
-                          }}
-                          className="bg-purple-600 hover:bg-purple-500 w-full"
-                          disabled={isSharing}
-                        >
-                          {isSharing ? 'Sharing...' : 'Generate Sync Code'}
-                        </Button>
-                      ) : (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2">
-                            <Input
-                              value={syncCode}
-                              readOnly
-                              className="font-mono text-lg font-bold text-center bg-slate-700/50 border-purple-500/50"
-                            />
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => {
-                                navigator.clipboard.writeText(syncCode);
-                                setSessionIdCopied(true);
-                                toast.success('Sync code copied!');
-                                setTimeout(() => setSessionIdCopied(false), 2000);
-                              }}
-                              className="border-purple-500/30"
-                            >
-                              {sessionIdCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => {
-                                // Stop sharing
-                                if ((window as any).__sessionSyncInterval) {
-                                  clearInterval((window as any).__sessionSyncInterval);
-                                }
-                                setSyncCode('');
-                                setIsSharing(false);
-                                toast.info('Stopped sharing');
-                              }}
-                              className="border-red-500/30 text-red-400 hover:bg-red-500/10"
-                            >
-                              Stop
-                            </Button>
-                          </div>
-                          <p className="text-xs text-gray-500 text-center">
-                            Share this code with your other device. It will automatically sync when they enter it.
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                    
-                    {/* Receive Session - Device 2 */}
-                    <div className="bg-slate-800/30 p-3 rounded-lg border border-green-500/20">
-                      <Label className="text-xs text-gray-400 mb-2 block">Receive session (Device 2):</Label>
-                      <div className="flex items-center gap-2">
-                        <Input
-                          value={syncCodeInput}
-                          onChange={(e) => setSyncCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))}
-                          placeholder="Enter 6-digit code (e.g., ABC123)"
-                          className="font-mono text-lg font-bold text-center bg-slate-700/50 border-green-500/50"
-                          maxLength={6}
-                          disabled={isReceiving}
-                        />
-                        <Button
-                          size="sm"
-                          onClick={() => {
-                            if (syncCodeInput.length === 6) {
-                              setIsReceiving(true);
-                              toast.info('Listening for session...');
-                              
-                              // Subscribe to the sync channel
-                              let timeoutId: ReturnType<typeof setTimeout>;
-                              const unsubscribe = subscribeToSessionSync(
-                                syncCodeInput,
-                                (receivedSessionId) => {
-                                  // Received session ID - apply it
-                                  clearTimeout(timeoutId);
-                                  setUserSessionId(receivedSessionId);
-                                  setIsReceiving(false);
-                                  unsubscribe();
-                                  toast.success('Session synced! Refreshing page...');
-                                  
-                                  // Reload to apply changes
-                                  setTimeout(() => window.location.reload(), 1000);
-                                },
-                                (error) => {
-                                  clearTimeout(timeoutId);
-                                  console.error('Session sync error:', error);
-                                  toast.error('Failed to receive session. Check the sync code.');
-                                  setIsReceiving(false);
-                                }
-                              );
-                              
-                              // Auto-unsubscribe after 30 seconds if no response
-                              timeoutId = setTimeout(() => {
-                                unsubscribe();
-                                setIsReceiving(false);
-                                toast.warning('Sync timeout. Please try again.');
-                              }, 30000);
-                            } else {
-                              toast.error('Please enter a 6-digit sync code');
-                            }
-                          }}
-                          className="bg-green-600 hover:bg-green-500"
-                          disabled={isReceiving || syncCodeInput.length !== 6}
-                        >
-                          {isReceiving ? 'Syncing...' : 'Sync'}
-                        </Button>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-2">
-                        Enter the 6-digit code from your other device to automatically sync your session.
-                      </p>
-                    </div>
-                  </div>
-                  
-                  {/* Manual Session Sync (Fallback) */}
-                  <div className="pt-3 border-t border-slate-700/50 space-y-3">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Copy className="w-4 h-4 text-gray-500" />
-                      <Label className="text-sm font-semibold text-gray-400">Manual Sync (Fallback)</Label>
-                    </div>
+                    <p className="text-xs text-gray-400 mb-3">
+                      When you create an election, your session ID is automatically shared via the Election ID.
+                      When someone joins an election using the Election ID, their session automatically syncs.
+                      This allows you to vote from multiple devices!
+                    </p>
                     
                     {/* Display current session ID */}
                     <div>
-                      <Label className="text-xs text-gray-400 mb-2 block">Your Session ID (copy this to sync manually):</Label>
+                      <Label className="text-xs text-gray-400 mb-2 block">Your Session ID (for reference):</Label>
                       <div className="flex items-center gap-2">
                         <Input
                           value={getUserSessionId()}
@@ -430,9 +275,9 @@ export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, e
                       </div>
                     </div>
                     
-                    {/* Paste session ID from another device */}
-                    <div>
-                      <Label className="text-xs text-gray-400 mb-2 block">Paste Session ID manually:</Label>
+                    {/* Manual Session Sync (Fallback) */}
+                    <div className="pt-3 border-t border-slate-700/50 mt-3">
+                      <Label className="text-xs text-gray-400 mb-2 block">Manual Session Sync (Fallback):</Label>
                       <div className="flex items-center gap-2">
                         <Input
                           value={sessionIdInput}
@@ -458,6 +303,9 @@ export function HomePage({ onCreateElection, onJoinElection, onDeleteElection, e
                           Sync
                         </Button>
                       </div>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Only use this if automatic sync via Election ID doesn't work
+                      </p>
                     </div>
                   </div>
                 </div>

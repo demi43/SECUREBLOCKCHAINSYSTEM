@@ -34,7 +34,10 @@ import {
   publishStatsEvent,
   publishUserVoteStatus,
   getUserSessionId,
+  setUserSessionId,
   enterPresence,
+  publishSessionId,
+  subscribeToSessionSync,
   type UserVoteStatus,
 } from "./ably";
 // Import TypeScript types for API responses
@@ -760,6 +763,28 @@ function App() {
         return newMap;
       });
 
+      // Publish session ID to Ably channel for this election (for cross-device sync)
+      // This allows other devices to automatically sync their session when joining this election
+      const userSessionId = getUserSessionId();
+      publishSessionId(id, userSessionId)
+        .then(() => {
+          console.log(`[ABLY] Session ID published for election: ${id}`);
+          // Keep publishing every 5 seconds while election is active
+          // This ensures devices joining later can still sync
+          const interval = setInterval(() => {
+            publishSessionId(id, userSessionId).catch((err) => {
+              console.warn(`[ABLY] Failed to republish session ID for ${id}:`, err);
+            });
+          }, 5000);
+          
+          // Store interval ID to clear when election ends or component unmounts
+          (window as any)[`__electionSync_${id}`] = interval;
+        })
+        .catch((err) => {
+          console.warn('[ABLY] Failed to publish session ID for election:', err);
+          // Don't fail election creation if Ably fails - election can still work locally
+        });
+
       // Set current election ID after state update is committed
       // Use a longer delay to ensure the Map update has propagated
       setTimeout(() => {
@@ -803,31 +828,62 @@ function App() {
     console.log("Election found?", !!election);
 
     if (election) {
+      // Election found in localStorage - join directly
       setCurrentElectionId(normalizedId);
       toast.success("Joined election successfully!");
     } else {
-      // Election not found - this could be because:
-      // 1. It was created in a different browser (localStorage is per-browser)
-      // 2. Wrong Election ID
-      // 3. Election was deleted
-      console.warn(
-        "Election not found. Available elections:",
-        Array.from(elections.keys())
+      // Election not found locally - try to sync session via Ably first
+      // The election ID serves as the sync code
+      console.log("Election not found locally, attempting session sync via Ably...");
+      toast.info("Syncing session... This will allow you to vote from this device.");
+      
+      // Subscribe to session sync channel for this election ID
+      let timeoutId: ReturnType<typeof setTimeout>;
+      const unsubscribe = subscribeToSessionSync(
+        normalizedId,
+        (receivedSessionId) => {
+          // Received session ID - apply it
+          clearTimeout(timeoutId);
+          console.log("[ABLY] Received session ID, applying...");
+          setUserSessionId(receivedSessionId);
+          unsubscribe();
+          
+          // Try to join again after syncing (election might still not be in localStorage)
+          const syncedElection = elections.get(normalizedId);
+          if (syncedElection) {
+            setCurrentElectionId(normalizedId);
+            toast.success("Session synced and joined election!");
+          } else {
+            // Session synced but election still not in localStorage
+            // This is OK - the user can still vote if they have the election ID
+            // The vote status will sync via Ably's election channel
+            toast.success("Session synced! You can now vote in this election.");
+            // Optionally, we could try to fetch election data from backend here
+            // For now, just sync the session and let the user know
+          }
+        },
+        (error) => {
+          clearTimeout(timeoutId);
+          console.error('Session sync error:', error);
+          toast.error(
+            `Election "${normalizedId}" not found!\n\n` +
+            `The election may not exist or the creator hasn't shared it yet.\n` +
+            `Make sure you have the correct Election ID.`
+          );
+        }
       );
       
-      let errorMessage = `Election "${normalizedId}" not found in this browser!\n\n`;
-      errorMessage += `Elections are stored per-browser in localStorage. `;
-      errorMessage += `To vote from multiple devices:\n`;
-      errorMessage += `1. Make sure you've synced your Session ID (use "Cross-Device Sync" on homepage)\n`;
-      errorMessage += `2. The election creator needs to share the Election ID with you\n`;
-      errorMessage += `3. Join the election using the Election ID\n\n`;
-      errorMessage += `Available elections in this browser: ${
-        elections.size > 0
-          ? Array.from(elections.keys()).join(", ")
-          : "none"
-      }`;
-      
-      toast.error(errorMessage, { duration: 8000 });
+      // Auto-unsubscribe after 10 seconds if no response
+      timeoutId = setTimeout(() => {
+        unsubscribe();
+        toast.warning(
+          `Election "${normalizedId}" not found.\n\n` +
+          `Make sure:\n` +
+          `1. The Election ID is correct\n` +
+          `2. The election creator has shared the Election ID\n` +
+          `3. Both devices are online`
+        );
+      }, 10000);
     }
   }
 
