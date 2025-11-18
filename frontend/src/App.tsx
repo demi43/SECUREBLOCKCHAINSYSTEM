@@ -722,14 +722,48 @@ function App() {
                     }
                   }
                   
-                  // Insert block at correct position
+                  // Recalculate previousHash based on the actual previous block in THIS device's chain
+                  // This ensures blocks always follow the last block created on this device
+                  let actualPreviousHash = "0"; // Default to "0" for genesis block
+                  if (insertIndex > 0) {
+                    // If inserting after at least one block, use the hash of the block before the insert position
+                    actualPreviousHash = currentBlocks[insertIndex - 1].hash;
+                  } else if (currentBlocks.length > 0 && blockEvent.block.index > 0) {
+                    // If inserting at the beginning but there are existing blocks, find the correct previous block
+                    // Find the block with index = blockEvent.block.index - 1
+                    const previousBlock = currentBlocks.find(b => b.index === blockEvent.block.index - 1);
+                    if (previousBlock) {
+                      actualPreviousHash = previousBlock.hash;
+                    } else {
+                      // If previous block doesn't exist yet, use the last block's hash
+                      actualPreviousHash = currentBlocks[currentBlocks.length - 1].hash;
+                    }
+                  }
+                  
+                  // Create a corrected block with the proper previousHash
+                  const correctedBlock: Block = {
+                    ...blockEvent.block,
+                    previousHash: actualPreviousHash,
+                  };
+                  
+                  // Recalculate hash since previousHash changed
+                  correctedBlock.hash = calculateHash(correctedBlock);
+                  
+                  // Insert block at correct position with corrected previousHash
                   const updatedBlockchain = [
                     ...currentBlocks.slice(0, insertIndex),
-                    blockEvent.block,
+                    correctedBlock,
                     ...currentBlocks.slice(insertIndex)
                   ];
                   
-                  console.log(`[ABLY] Inserting block at index ${insertIndex}, block index: ${blockEvent.block.index}`);
+                  // Recalculate previousHash for all blocks after the inserted block
+                  // This ensures the chain is properly linked
+                  for (let i = insertIndex + 1; i < updatedBlockchain.length; i++) {
+                    updatedBlockchain[i].previousHash = updatedBlockchain[i - 1].hash;
+                    updatedBlockchain[i].hash = calculateHash(updatedBlockchain[i]);
+                  }
+                  
+                  console.log(`[ABLY] Inserting block at index ${insertIndex}, block index: ${blockEvent.block.index}, previousHash corrected to: ${actualPreviousHash.slice(0, 10)}`);
                   const updatedElection: ElectionData = {
                     ...currentElection,
                     blockchain: updatedBlockchain,
