@@ -220,7 +220,8 @@ function loadElectionsFromStorage(): Map<string, ElectionData> {
           contractAddress: contractAddress,
         });
         console.log(
-          `Loaded contract election ${id} with ${blockchain.length} blocks`
+          `Loaded contract election ${id} with ${blockchain.length} blocks`,
+          blockchain.length > 0 ? `(indices: ${blockchain.map(b => b.index).join(', ')})` : '(genesis only)'
         );
       } else {
         // Local-only election - load everything including full blockchain
@@ -270,8 +271,10 @@ function saveElectionsToStorage(elections: Map<string, ElectionData>) {
       if (contractAddress) {
         // Save election metadata AND blockchain blocks (for display purposes)
         // Vote counts are still authoritative from backend, but blocks are saved for visualization
+        const blockchainToSave = data.blockchain || [];
         console.log(
-          `Saving election ${id} with blockchain display (contract at ${contractAddress})`
+          `Saving election ${id} with blockchain display (contract at ${contractAddress}), blocks: ${blockchainToSave.length}`,
+          blockchainToSave.length > 0 ? `(indices: ${blockchainToSave.map((b: Block) => b.index).join(', ')})` : '(empty)'
         );
         toStore[id] = {
           election: {
@@ -286,7 +289,7 @@ function saveElectionsToStorage(elections: Map<string, ElectionData>) {
             creatorId: data.election.creatorId, // Include creatorId for admin controls
           },
           // Save blockchain blocks for display (vote counts still come from backend)
-          blockchain: data.blockchain || [], // Save blockchain blocks for visualization
+          blockchain: blockchainToSave, // Save blockchain blocks for visualization
           contractAddress: contractAddress,
           metadataOnly: false, // Changed to false since we're saving blockchain now
         };
@@ -488,6 +491,7 @@ function App() {
   // This effect automatically saves elections to localStorage whenever the elections Map changes
   useEffect(() => {
     // Always save, even if empty (to clear localStorage when all elections are deleted)
+    console.log('[SAVE] Elections changed, saving to localStorage. Total elections:', elections.size);
     saveElectionsToStorage(elections);
     // Only trigger custom event for cross-tab sync (not for local updates)
     // The storage event will handle cross-tab updates automatically
@@ -758,22 +762,30 @@ function App() {
                   
                   // Recalculate previousHash for all blocks after the inserted block
                   // This ensures the chain is properly linked
-                  for (let i = insertIndex + 1; i < updatedBlockchain.length; i++) {
-                    updatedBlockchain[i].previousHash = updatedBlockchain[i - 1].hash;
-                    updatedBlockchain[i].hash = calculateHash(updatedBlockchain[i]);
+                  // Create new block objects (don't mutate existing ones) to ensure React detects changes
+                  const finalBlockchain: Block[] = [...updatedBlockchain];
+                  for (let i = insertIndex + 1; i < finalBlockchain.length; i++) {
+                    finalBlockchain[i] = {
+                      ...finalBlockchain[i],
+                      previousHash: finalBlockchain[i - 1].hash,
+                      hash: "", // Reset hash before recalculating
+                    };
+                    finalBlockchain[i].hash = calculateHash(finalBlockchain[i]);
                   }
                   
                   console.log(`[ABLY] Inserting block at index ${insertIndex}, block index: ${blockEvent.block.index}, previousHash corrected to: ${actualPreviousHash.slice(0, 10)}`);
+                  console.log(`[ABLY] Final blockchain length: ${finalBlockchain.length}, blocks:`, finalBlockchain.map(b => ({ index: b.index, hash: b.hash.slice(0, 10) })));
+                  
                   const updatedElection: ElectionData = {
                     ...currentElection,
-                    blockchain: updatedBlockchain,
+                    blockchain: finalBlockchain, // Use the final blockchain with all corrected hashes
                   };
                   
                   // Create new Map with updated election
                   const newMap = new Map(prev);
                   newMap.set(currentElectionIdValue, updatedElection);
                   
-                  console.log("[ABLY] Block added to blockchain:", blockEvent.block.index, "Total blocks:", updatedBlockchain.length);
+                  console.log("[ABLY] Block added to blockchain:", blockEvent.block.index, "Total blocks:", finalBlockchain.length);
                   return newMap;
                 });
               }
@@ -1414,6 +1426,7 @@ function App() {
               // Publish block event via Ably so other devices can sync
               publishBlockEvent(currentElectionId, voteBlock);
               
+              console.log(`[VOTE] Backend vote: Block ${voteBlock.index} added, total blocks: ${updatedBlockchain.length}. State updated, save should trigger.`);
               return newMap;
             });
           }
@@ -1606,6 +1619,8 @@ function App() {
 
           const newMap = new Map(prev);
           newMap.set(currentElectionId!, updatedElection);
+
+          console.log(`[VOTE] Local vote: Block ${minedBlock.index} added, total blocks: ${updatedBlockchain.length}. State updated, save should trigger.`);
 
           // Reset the flag after the save effect has completed
           setTimeout(() => {
