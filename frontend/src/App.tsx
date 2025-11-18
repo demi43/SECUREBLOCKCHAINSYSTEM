@@ -221,7 +221,7 @@ function loadElectionsFromStorage(): Map<string, ElectionData> {
         });
         console.log(
           `Loaded contract election ${id} with ${blockchain.length} blocks`,
-          blockchain.length > 0 ? `(indices: ${blockchain.map(b => b.index).join(', ')})` : '(genesis only)'
+          blockchain.length > 0 ? `(indices: ${blockchain.map((b: Block) => b.index).join(', ')})` : '(genesis only)'
         );
       } else {
         // Local-only election - load everything including full blockchain
